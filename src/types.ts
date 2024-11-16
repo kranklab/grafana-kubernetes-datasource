@@ -1,13 +1,16 @@
 import { DataSourceJsonData } from '@grafana/data';
 import { DataQuery } from '@grafana/schema';
 
-export interface MyQuery extends DataQuery {
-  queryText?: string;
-  constant: number;
+export interface KubernetesQuery extends DataQuery {
+  action: string | 'get' | 'describe';
+  namespace: string;
+  resource: string | 'pod';
 }
 
-export const DEFAULT_QUERY: Partial<MyQuery> = {
-  constant: 6.5,
+export const DEFAULT_QUERY: Partial<KubernetesQuery> = {
+  action: "get",
+  namespace: 'default',
+  resource: 'pod'
 };
 
 export interface DataPoint {
@@ -22,13 +25,13 @@ export interface DataSourceResponse {
 /**
  * These are options configured for each DataSource instance
  */
-export interface MyDataSourceOptions extends DataSourceJsonData {
-  path?: string;
+export interface KubernetesDatasourceOptions extends DataSourceJsonData {
+  url?: string;
 }
 
 /**
  * Value that is used in the backend, but never sent over HTTP to the frontend
  */
-export interface MySecureJsonData {
+export interface SecureJsonData {
   apiKey?: string;
 }

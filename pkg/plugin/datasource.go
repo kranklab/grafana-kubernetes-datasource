@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"time"
-
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
 	"github.com/grafana/grafana-plugin-sdk-go/backend/instancemgmt"
 	"github.com/grafana/grafana-plugin-sdk-go/data"
 	"github.com/kranklab/kubernetes-datasource/pkg/models"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
+	"log"
 )
 
 // Make sure Datasource implements required interfaces. This is important to do
@@ -59,9 +61,17 @@ func (d *Datasource) QueryData(ctx context.Context, req *backend.QueryDataReques
 	return response, nil
 }
 
-type queryModel struct{}
+type queryModel struct {
+	Action    string `json:"action"`
+	Resource  string `json:"resource"`
+	Namespace string `json:"namespace"`
+}
 
-func (d *Datasource) query(_ context.Context, pCtx backend.PluginContext, query backend.DataQuery) backend.DataResponse {
+type jsonData struct {
+	Url string `json:"url"`
+}
+
+func (d *Datasource) query(ctx context.Context, pCtx backend.PluginContext, query backend.DataQuery) backend.DataResponse {
 	var response backend.DataResponse
 
 	// Unmarshal the JSON into our queryModel.
@@ -72,19 +82,14 @@ func (d *Datasource) query(_ context.Context, pCtx backend.PluginContext, query 
 		return backend.ErrDataResponse(backend.StatusBadRequest, fmt.Sprintf("json unmarshal: %v", err.Error()))
 	}
 
-	// create data frame response.
-	// For an overview on data frames and how grafana handles them:
-	// https://grafana.com/developers/plugin-tools/introduction/data-frames
-	frame := data.NewFrame("response")
-
-	// add fields.
-	frame.Fields = append(frame.Fields,
-		data.NewField("time", nil, []time.Time{query.TimeRange.From, query.TimeRange.To}),
-		data.NewField("values", nil, []int64{10, 20}),
-	)
-
-	// add the frames to the response.
-	response.Frames = append(response.Frames, frame)
+	switch qm.Action {
+	case "get":
+		frame, err := d.runGetQuery(ctx, pCtx, qm)
+		if err != nil {
+			return backend.ErrDataResponse(backend.StatusBadRequest, fmt.Sprintf("request failed: %v", err.Error()))
+		}
+		response.Frames = append(response.Frames, frame)
+	}
 
 	return response
 }
@@ -113,4 +118,48 @@ func (d *Datasource) CheckHealth(_ context.Context, req *backend.CheckHealthRequ
 		Status:  backend.HealthStatusOk,
 		Message: "Data source is working",
 	}, nil
+}
+
+func (d *Datasource) runGetQuery(ctx context.Context, pCtx backend.PluginContext, qm queryModel) (*data.Frame, error) {
+
+	var data jsonData
+	err := json.Unmarshal(pCtx.DataSourceInstanceSettings.JSONData, &data)
+	if err != nil {
+		return nil, err
+	}
+
+	// Create the clientset
+	clientset, err := kubernetes.NewForConfig(&rest.Config{
+		Host: data.Url,
+		TLSClientConfig: rest.TLSClientConfig{
+			Insecure: true,
+		},
+		BearerToken: "",
+	})
+	if err != nil {
+		log.Fatalf("Error creating Kubernetes client: %v", err)
+	}
+
+	switch qm.Resource {
+	case "pods":
+		return getPods(ctx, clientset, qm.Namespace)
+	}
+
+	return nil, fmt.Errorf("resource not recognized: %s", qm.Resource)
+}
+
+// getPods retrieves pods from the specified namespace (or all namespaces if namespace is empty)
+func getPods(ctx context.Context, clientset *kubernetes.Clientset, namespace string) (*data.Frame, error) {
+
+	list, err := clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, err
+	}
+	frame := data.NewFrame("response", data.NewField("podName", nil, []string{}))
+
+	for _, pod := range list.Items {
+		frame.AppendRow(pod.Name)
+	}
+
+	return frame, nil
 }

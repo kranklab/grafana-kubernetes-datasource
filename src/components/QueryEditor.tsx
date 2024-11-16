@@ -1,44 +1,59 @@
 import React, { ChangeEvent } from 'react';
-import { InlineField, Input, Stack } from '@grafana/ui';
-import { QueryEditorProps } from '@grafana/data';
-import { DataSource } from '../datasource';
-import { MyDataSourceOptions, MyQuery } from '../types';
+import {InlineField, Input, Stack} from '@grafana/ui';
+import {QueryEditorProps} from '@grafana/data';
+import {DataSource} from '../datasource';
+import {KubernetesDatasourceOptions, KubernetesQuery} from '../types';
 
-type Props = QueryEditorProps<DataSource, MyQuery, MyDataSourceOptions>;
+type Props = QueryEditorProps<DataSource, KubernetesQuery, KubernetesDatasourceOptions>;
 
-export function QueryEditor({ query, onChange, onRunQuery }: Props) {
-  const onQueryTextChange = (event: ChangeEvent<HTMLInputElement>) => {
-    onChange({ ...query, queryText: event.target.value });
-  };
+export function QueryEditor({query, onChange, onRunQuery}: Props) {
 
-  const onConstantChange = (event: ChangeEvent<HTMLInputElement>) => {
-    onChange({ ...query, constant: parseFloat(event.target.value) });
-    // executes the query
-    onRunQuery();
-  };
-
-  const { queryText, constant } = query;
-
-  return (
-    <Stack gap={0}>
-      <InlineField label="Constant">
-        <Input
-          id="query-editor-constant"
-          onChange={onConstantChange}
-          value={constant}
-          width={8}
-          type="number"
-          step="0.1"
-        />
+    return (
+        <Stack gap={0}>
+            <InlineField label="Action">
+                <Input
+                    id="query-editor-action-text"
+                    onChange={(event: ChangeEvent<HTMLInputElement>) => {
+                        onChange({
+                            ...query,
+                            action: event.target.value
+                        })
+                        onRunQuery()
+                    }}
+                    value={query.action || ''}
+                    required
+                    placeholder="Enter a action name"
+                />
       </InlineField>
-      <InlineField label="Query Text" labelWidth={16} tooltip="Not used yet">
-        <Input
-          id="query-editor-query-text"
-          onChange={onQueryTextChange}
-          value={queryText || ''}
-          required
-          placeholder="Enter a query"
-        />
+            <InlineField label="Namespace">
+                <Input
+                    id="query-editor-namespace-text"
+                    onChange={(event: ChangeEvent<HTMLInputElement>) => {
+                        onChange({
+                            ...query,
+                            namespace: event.target.value
+                        })
+                        onRunQuery()
+                    }}
+                    value={query.namespace || ''}
+                    required
+                    placeholder="Enter a namespace name"
+                />
+      </InlineField>
+            <InlineField label="Resource">
+                <Input
+                    id="query-editor-resource-text"
+                    onChange={(event: ChangeEvent<HTMLInputElement>) => {
+                        onChange({
+                            ...query,
+                            resource: event.target.value
+                        })
+                        onRunQuery()
+                    }}
+                    value={query.resource || ''}
+                    required
+                    placeholder="Enter a resource name"
+                />
       </InlineField>
     </Stack>
   );

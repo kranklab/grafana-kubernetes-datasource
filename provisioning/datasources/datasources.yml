@@ -9,6 +9,6 @@ datasources:
     version: 1
     editable: true
     jsonData:
-      path: '/resources'
+      url: "localhost:2323"
     secureJsonData:
       apiKey: 'api-key'
