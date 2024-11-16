@@ -143,9 +143,30 @@ func (d *Datasource) runGetQuery(ctx context.Context, pCtx backend.PluginContext
 	switch qm.Resource {
 	case "pods":
 		return getPods(ctx, clientset, qm.Namespace)
+	case "deployments":
+		return getDeployments(ctx, clientset, qm.Namespace)
 	}
 
 	return nil, fmt.Errorf("resource not recognized: %s", qm.Resource)
+}
+
+func getDeployments(ctx context.Context, clientset *kubernetes.Clientset, namespace string) (*data.Frame, error) {
+
+	list, err := clientset.AppsV1().Deployments(namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, err
+	}
+
+	frame := data.NewFrame("response",
+		data.NewField("name", nil, []string{}),
+		data.NewField("namespace", nil, []string{}),
+	)
+
+	for _, pod := range list.Items {
+		frame.AppendRow(pod.Name, pod.Namespace)
+	}
+
+	return frame, nil
 }
 
 // getPods retrieves pods from the specified namespace (or all namespaces if namespace is empty)
@@ -155,10 +176,13 @@ func getPods(ctx context.Context, clientset *kubernetes.Clientset, namespace str
 	if err != nil {
 		return nil, err
 	}
-	frame := data.NewFrame("response", data.NewField("podName", nil, []string{}))
+	frame := data.NewFrame("response",
+		data.NewField("name", nil, []string{}),
+		data.NewField("namespace", nil, []string{}),
+	)
 
 	for _, pod := range list.Items {
-		frame.AppendRow(pod.Name)
+		frame.AppendRow(pod.Name, pod.Namespace)
 	}
 
 	return frame, nil
