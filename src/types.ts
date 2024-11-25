@@ -26,6 +26,9 @@ export interface DataSourceResponse {
  * These are options configured for each DataSource instance
  */
 export interface KubernetesDatasourceOptions extends DataSourceJsonData {
+  clientCert?: string;
+  clientKey?: string;
+  caCert?: string;
   url?: string;
 }
 

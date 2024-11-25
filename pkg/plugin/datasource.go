@@ -12,6 +12,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"log"
+	"time"
 )
 
 // Make sure Datasource implements required interfaces. This is important to do
@@ -68,7 +69,18 @@ type queryModel struct {
 }
 
 type jsonData struct {
-	Url string `json:"url"`
+	Url        string `json:"url"`
+	ClientCert string `json:"clientCert"`
+	ClientKey  string `json:"clientKey"`
+	CaCert     string `json:"caCert"`
+}
+
+// CustomObjectReference represents a simplified version of k8s ObjectReference
+type CustomObjectReference struct {
+	Kind      string `json:"kind"`
+	Name      string `json:"name"`
+	Namespace string `json:"namespace"`
+	UID       string `json:"uid"`
 }
 
 func (d *Datasource) query(ctx context.Context, pCtx backend.PluginContext, query backend.DataQuery) backend.DataResponse {
@@ -132,19 +144,30 @@ func (d *Datasource) runGetQuery(ctx context.Context, pCtx backend.PluginContext
 	clientset, err := kubernetes.NewForConfig(&rest.Config{
 		Host: data.Url,
 		TLSClientConfig: rest.TLSClientConfig{
-			Insecure: true,
+			CertFile: data.ClientCert,
+			KeyFile:  data.ClientKey,
+			CAFile:   data.CaCert,
 		},
-		BearerToken: "",
 	})
 	if err != nil {
 		log.Fatalf("Error creating Kubernetes client: %v", err)
 	}
 
 	switch qm.Resource {
-	case "pods":
+	case "pod", "pods":
 		return getPods(ctx, clientset, qm.Namespace)
 	case "deployments":
 		return getDeployments(ctx, clientset, qm.Namespace)
+	case "daemonsets":
+		return getDeamonSets(ctx, clientset, qm.Namespace)
+	case "statefulsets":
+		return getStatefulSets(ctx, clientset, qm.Namespace)
+	case "replicasets":
+		return getReplicaSets(ctx, clientset, qm.Namespace)
+	case "jobs":
+		return getJobs(ctx, clientset, qm.Namespace)
+	case "cronjobs":
+		return getCronJobs(ctx, clientset, qm.Namespace)
 	}
 
 	return nil, fmt.Errorf("resource not recognized: %s", qm.Resource)
@@ -160,10 +183,227 @@ func getDeployments(ctx context.Context, clientset *kubernetes.Clientset, namesp
 	frame := data.NewFrame("response",
 		data.NewField("name", nil, []string{}),
 		data.NewField("namespace", nil, []string{}),
+		data.NewField("status", nil, []string{}),
+		data.NewField("images", nil, []json.RawMessage{}),
+		data.NewField("labels", nil, []json.RawMessage{}),
+		data.NewField("target", nil, []int32{}),
+		data.NewField("available", nil, []int32{}),
+		data.NewField("created", nil, []time.Time{}),
 	)
 
 	for _, pod := range list.Items {
-		frame.AppendRow(pod.Name, pod.Namespace)
+		images := make([]string, len(pod.Spec.Template.Spec.Containers))
+		for i, container := range pod.Spec.Template.Spec.Containers {
+			images[i] = container.Image
+		}
+		jsonImages, err := json.Marshal(images)
+		if err != nil {
+			return nil, err
+		}
+		labels, err := json.Marshal(pod.ObjectMeta.Labels)
+		if err != nil {
+			return nil, err
+		}
+		frame.AppendRow(pod.Name, pod.Namespace, "ok", json.RawMessage(jsonImages), json.RawMessage(labels), pod.Status.Replicas, pod.Status.AvailableReplicas, pod.CreationTimestamp.Time)
+	}
+
+	return frame, nil
+}
+
+// getDaemonsets retrieves daemonsets
+func getDeamonSets(ctx context.Context, clientset *kubernetes.Clientset, namespace string) (*data.Frame, error) {
+
+	list, err := clientset.AppsV1().DaemonSets(namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, err
+	}
+
+	frame := data.NewFrame("response",
+		data.NewField("name", nil, []string{}),
+		data.NewField("namespace", nil, []string{}),
+		data.NewField("status", nil, []string{}),
+		data.NewField("images", nil, []json.RawMessage{}),
+		data.NewField("labels", nil, []json.RawMessage{}),
+		data.NewField("target", nil, []int32{}),
+		data.NewField("available", nil, []int32{}),
+		data.NewField("created", nil, []time.Time{}),
+	)
+
+	for _, pod := range list.Items {
+		images := make([]string, len(pod.Spec.Template.Spec.Containers))
+		for i, container := range pod.Spec.Template.Spec.Containers {
+			images[i] = container.Image
+		}
+		jsonImages, err := json.Marshal(images)
+		if err != nil {
+			return nil, err
+		}
+		labels, err := json.Marshal(pod.ObjectMeta.Labels)
+		if err != nil {
+			return nil, err
+		}
+		frame.AppendRow(pod.Name, pod.Namespace, "ok", json.RawMessage(jsonImages), json.RawMessage(labels), pod.Status.DesiredNumberScheduled, pod.Status.CurrentNumberScheduled, pod.CreationTimestamp.Time)
+	}
+
+	return frame, nil
+}
+
+// getStatefulsets retrieves statefulsets
+func getStatefulSets(ctx context.Context, clientset *kubernetes.Clientset, namespace string) (*data.Frame, error) {
+
+	list, err := clientset.AppsV1().StatefulSets(namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, err
+	}
+
+	frame := data.NewFrame("response",
+		data.NewField("name", nil, []string{}),
+		data.NewField("namespace", nil, []string{}),
+		data.NewField("status", nil, []string{}),
+		data.NewField("images", nil, []json.RawMessage{}),
+		data.NewField("labels", nil, []json.RawMessage{}),
+		data.NewField("target", nil, []int32{}),
+		data.NewField("available", nil, []int32{}),
+		data.NewField("created", nil, []time.Time{}),
+	)
+
+	for _, pod := range list.Items {
+		images := make([]string, len(pod.Spec.Template.Spec.Containers))
+		for i, container := range pod.Spec.Template.Spec.Containers {
+			images[i] = container.Image
+		}
+		jsonImages, err := json.Marshal(images)
+		if err != nil {
+			return nil, err
+		}
+		labels, err := json.Marshal(pod.ObjectMeta.Labels)
+		if err != nil {
+			return nil, err
+		}
+		frame.AppendRow(pod.Name, pod.Namespace, "ok", json.RawMessage(jsonImages), json.RawMessage(labels), pod.Status.Replicas, pod.Status.AvailableReplicas, pod.CreationTimestamp.Time)
+	}
+
+	return frame, nil
+}
+
+// getReplicasets retrieves replicasets
+func getReplicaSets(ctx context.Context, clientset *kubernetes.Clientset, namespace string) (*data.Frame, error) {
+
+	list, err := clientset.AppsV1().ReplicaSets(namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, err
+	}
+
+	frame := data.NewFrame("response",
+		data.NewField("name", nil, []string{}),
+		data.NewField("namespace", nil, []string{}),
+		data.NewField("status", nil, []string{}),
+		data.NewField("images", nil, []json.RawMessage{}),
+		data.NewField("labels", nil, []json.RawMessage{}),
+		data.NewField("target", nil, []int32{}),
+		data.NewField("available", nil, []int32{}),
+		data.NewField("created", nil, []time.Time{}),
+	)
+
+	for _, pod := range list.Items {
+		images := make([]string, len(pod.Spec.Template.Spec.Containers))
+		for i, container := range pod.Spec.Template.Spec.Containers {
+			images[i] = container.Image
+		}
+		jsonImages, err := json.Marshal(images)
+		if err != nil {
+			return nil, err
+		}
+		labels, err := json.Marshal(pod.ObjectMeta.Labels)
+		if err != nil {
+			return nil, err
+		}
+		frame.AppendRow(pod.Name, pod.Namespace, "ok", json.RawMessage(jsonImages), json.RawMessage(labels), pod.Status.Replicas, pod.Status.AvailableReplicas, pod.CreationTimestamp.Time)
+	}
+
+	return frame, nil
+}
+
+// getJobs retrieves kubernetes jobs
+func getJobs(ctx context.Context, clientset *kubernetes.Clientset, namespace string) (*data.Frame, error) {
+
+	list, err := clientset.BatchV1().Jobs(namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, err
+	}
+
+	frame := data.NewFrame("response",
+		data.NewField("name", nil, []string{}),
+		data.NewField("namespace", nil, []string{}),
+		data.NewField("status", nil, []string{}),
+		data.NewField("images", nil, []json.RawMessage{}),
+		data.NewField("labels", nil, []json.RawMessage{}),
+		data.NewField("succeeded", nil, []int32{}),
+		data.NewField("completed", nil, []*int32{}),
+		data.NewField("created", nil, []time.Time{}),
+	)
+
+	for _, itm := range list.Items {
+		images := make([]string, len(itm.Spec.Template.Spec.Containers))
+		for i, container := range itm.Spec.Template.Spec.Containers {
+			images[i] = container.Image
+		}
+		jsonImages, err := json.Marshal(images)
+		if err != nil {
+			return nil, err
+		}
+		labels, err := json.Marshal(itm.ObjectMeta.Labels)
+		if err != nil {
+			return nil, err
+		}
+		frame.AppendRow(itm.Name, itm.Namespace, "ok", json.RawMessage(jsonImages), json.RawMessage(labels), itm.Status.Succeeded, itm.Spec.Completions, itm.CreationTimestamp.Time)
+	}
+
+	return frame, nil
+}
+
+// getCronJobs retrieves kubernetes jobs
+func getCronJobs(ctx context.Context, clientset *kubernetes.Clientset, namespace string) (*data.Frame, error) {
+
+	list, err := clientset.BatchV1().CronJobs(namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, err
+	}
+
+	frame := data.NewFrame("response",
+		data.NewField("name", nil, []string{}),
+		data.NewField("namespace", nil, []string{}),
+		data.NewField("status", nil, []string{}),
+		data.NewField("images", nil, []json.RawMessage{}),
+		data.NewField("labels", nil, []json.RawMessage{}),
+		data.NewField("schedule", nil, []string{}),
+		data.NewField("suspend", nil, []*bool{}),
+		data.NewField("active", nil, []int{}),
+		data.NewField("lastscheduled", nil, []*time.Time{}),
+		data.NewField("created", nil, []time.Time{}),
+	)
+
+	for _, itm := range list.Items {
+		images := make([]string, len(itm.Spec.JobTemplate.Spec.Template.Spec.Containers))
+		for i, container := range itm.Spec.JobTemplate.Spec.Template.Spec.Containers {
+			images[i] = container.Image
+		}
+		jsonImages, err := json.Marshal(images)
+		if err != nil {
+			return nil, err
+		}
+		labels, err := json.Marshal(itm.ObjectMeta.Labels)
+		if err != nil {
+			return nil, err
+		}
+
+		// Handle LastScheduleTime (use zero time if nil)
+		var lastScheduled *time.Time
+		if itm.Status.LastScheduleTime != nil {
+			lastScheduled = &itm.Status.LastScheduleTime.Time
+		}
+
+		frame.AppendRow(itm.Name, itm.Namespace, "ok", json.RawMessage(jsonImages), json.RawMessage(labels), itm.Spec.Schedule, itm.Spec.Suspend, len(itm.Status.Active), lastScheduled, itm.CreationTimestamp.Time)
 	}
 
 	return frame, nil

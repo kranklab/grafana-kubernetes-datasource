@@ -17,6 +17,7 @@ services:
       - 'seccomp:unconfined'
     cap_add:
       - SYS_PTRACE
+    network_mode: host
     volumes:
       - ./dist:/var/lib/grafana/plugins/kranklab-kubernetes-datasource
       - ./provisioning:/etc/grafana/provisioning
@@ -28,3 +29,4 @@ services:
       GF_LOG_LEVEL: debug
       GF_DATAPROXY_LOGGING: 1
       GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS: kranklab-kubernetes-datasource
+      GF_INSTALL_PLUGINS: grafana-polystat-panel

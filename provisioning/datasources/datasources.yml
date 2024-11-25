@@ -1,6 +1,11 @@
 apiVersion: 1
 
 datasources:
+  - name: gdev-testdata
+    isDefault: false
+    type: testdata
+  - name: 'kubernetes-datasource2'
+    type: 'kranklab-kubernetes-datasource'
   - name: 'kubernetes-datasource'
     type: 'kranklab-kubernetes-datasource'
     access: proxy
@@ -9,6 +14,9 @@ datasources:
     version: 1
     editable: true
     jsonData:
-      url: "localhost:2323"
+      url: https://192.168.49.2:8443
+      clientCert: "/root/kranklab-kubernetes-datasource/client.crt"
+      clientKey: "/root/kranklab-kubernetes-datasource/client.key"
+      caCert: "/root/kranklab-kubernetes-datasource/ca.crt"
     secureJsonData:
       apiKey: 'api-key'

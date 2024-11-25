@@ -1,5 +1,5 @@
 import React, { ChangeEvent } from 'react';
-import { InlineField, Input, SecretInput } from '@grafana/ui';
+import {InlineField, Input, SecretInput} from '@grafana/ui';
 import { DataSourcePluginOptionsEditorProps } from '@grafana/data';
 import { KubernetesDatasourceOptions, SecureJsonData } from '../types';
 
@@ -15,6 +15,33 @@ export function ConfigEditor(props: Props) {
       jsonData: {
         ...jsonData,
         url: event.target.value,
+      },
+    });
+  };
+  const onClientCertChange = (event: ChangeEvent<HTMLInputElement>) => {
+    onOptionsChange({
+      ...options,
+      jsonData: {
+        ...jsonData,
+        clientCert: event.target.value,
+      },
+    });
+  };
+  const onClientKeyChange = (event: ChangeEvent<HTMLInputElement>) => {
+    onOptionsChange({
+      ...options,
+      jsonData: {
+        ...jsonData,
+        clientKey: event.target.value,
+      },
+    });
+  };
+  const onCaCertChange = (event: ChangeEvent<HTMLInputElement>) => {
+    onOptionsChange({
+      ...options,
+      jsonData: {
+        ...jsonData,
+        caCert: event.target.value,
       },
     });
   };
@@ -51,6 +78,33 @@ export function ConfigEditor(props: Props) {
           onChange={onUrlChange}
           value={jsonData.url}
           placeholder="Enter url for kubernetes control plane."
+          width={40}
+        />
+      </InlineField>
+      <InlineField label="cert file" labelWidth={20} interactive tooltip={'The client cert file location.'}>
+        <Input
+          id="config-editor-url"
+          onChange={onClientCertChange}
+          value={jsonData.clientCert}
+          placeholder="Enter location for kubernetes client cert."
+          width={40}
+        />
+      </InlineField>
+      <InlineField label="client key" labelWidth={20} interactive tooltip={'The client key file location'}>
+        <Input
+          id="config-editor-url"
+          onChange={onClientKeyChange}
+          value={jsonData.clientKey}
+          placeholder="Enter location for kubernetes client key."
+          width={40}
+        />
+      </InlineField>
+      <InlineField label="CA cert" labelWidth={20} interactive tooltip={'The CA cert file location'}>
+        <Input
+          id="config-editor-url"
+          onChange={onCaCertChange}
+          value={jsonData.caCert}
+          placeholder="Enter location for kubernetes CA cert."
           width={40}
         />
       </InlineField>
