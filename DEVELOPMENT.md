@@ -14,7 +14,7 @@ kranklab/
 ## Prerequisites
 
 - **Node** via nvm
-- **Go** via gvm — project requires Go 1.22+
+- **Go** via gvm — project requires Go 1.25+
 - **mage** — Go build tool for the backend
 - **Docker + Docker Compose**
 - **Minikube** — local Kubernetes cluster
@@ -23,13 +23,13 @@ kranklab/
 
 ```bash
 source ~/.gvm/scripts/gvm
-gvm use go1.22.6
+gvm use go1.25
 go install github.com/magefile/mage@latest
 ```
 
 Add to IntelliJ terminal PATH via **Settings → Tools → Terminal → Environment variables**:
 ```
-PATH=/home/sdonnell/.gvm/gos/go1.22.6/bin:/home/sdonnell/go/bin:$PATH
+PATH=/home/sdonnell/.gvm/gos/go1.25/bin:/home/sdonnell/go/bin:$PATH
 ```
 
 ## Kubernetes Certs
@@ -37,9 +37,10 @@ PATH=/home/sdonnell/.gvm/gos/go1.22.6/bin:/home/sdonnell/go/bin:$PATH
 The datasource connects to Minikube using mTLS. The cert files must be copied from Minikube into the datasource repo root (they are mounted into the Grafana container at runtime):
 
 ```bash
-cp ~/.minikube/ca.crt ~/repo/repo2/github/kranklab/grafana-kubernetes-datasource/ca.crt
-cp ~/.minikube/profiles/minikube/client.crt ~/repo/repo2/github/kranklab/grafana-kubernetes-datasource/client.crt
-cp ~/.minikube/profiles/minikube/client.key ~/repo/repo2/github/kranklab/grafana-kubernetes-datasource/client.key
+y# Run from the datasource repo root
+cp ~/.minikube/ca.crt ./ca.crt
+cp ~/.minikube/profiles/minikube/client.crt ./client.crt
+cp ~/.minikube/profiles/minikube/client.key ./client.key
 ```
 
 > These certs change when Minikube is recreated. Re-run the above if you get connection errors.

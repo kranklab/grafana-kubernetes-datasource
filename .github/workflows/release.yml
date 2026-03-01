@@ -1,26 +1,72 @@
-# This GitHub Action automates the process of building Grafana plugins.
-# (For more information, see https://github.com/grafana/plugin-actions/blob/main/build-plugin/README.md)
 name: Release
 
 on:
   push:
     tags:
-      - 'v*' # Run workflow on version tags, e.g. v1.0.0.
+      - 'v*'
 
-permissions: read-all
+permissions:
+  contents: write
 
 jobs:
   release:
-    permissions:
-      contents: write
+    name: Build and release
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: grafana/plugin-actions/build-plugin@release
-        # Uncomment to enable plugin signing
-        # (For more info on how to generate the access policy token see https://grafana.com/developers/plugin-tools/publish-a-plugin/sign-a-plugin#generate-an-access-policy-token)
-        #with:
-        # Make sure to save the token in your repository secrets
-        #policy_token: $
-        # Usage of GRAFANA_API_KEY is deprecated, prefer `policy_token` option above
-        #grafana_token: $
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      - name: Build backend
+        uses: magefile/mage-action@v3
+        with:
+          version: latest
+          args: buildAll
+
+      - name: Get plugin metadata
+        id: meta
+        run: |
+          PLUGIN_ID=$(jq -r '.id' dist/plugin.json)
+          PLUGIN_VERSION=$(jq -r '.info.version' dist/plugin.json)
+          echo "plugin-id=${PLUGIN_ID}" >> "$GITHUB_OUTPUT"
+          echo "plugin-version=${PLUGIN_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "archive=${PLUGIN_ID}-${PLUGIN_VERSION}.zip" >> "$GITHUB_OUTPUT"
+
+      - name: Package plugin
+        run: |
+          cp LICENSE dist/
+          mv dist "${{ steps.meta.outputs.plugin-id }}"
+          zip -r "${{ steps.meta.outputs.archive }}" "${{ steps.meta.outputs.plugin-id }}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.meta.outputs.plugin-id }}-${{ steps.meta.outputs.plugin-version }}
+          path: ${{ steps.meta.outputs.archive }}
+          retention-days: 7
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            --title "${{ steps.meta.outputs.plugin-id }} v${{ steps.meta.outputs.plugin-version }}" \
+            --generate-notes \
+            "${{ steps.meta.outputs.archive }}"

@@ -35,7 +35,7 @@
     "eslint-plugin-deprecation": "^2.0.0",
     "eslint-webpack-plugin": "^4.0.1",
     "fork-ts-checker-webpack-plugin": "^8.0.0",
-    "glob": "^10.2.7",
+    "glob": "^13.0.6",
     "identity-obj-proxy": "3.0.0",
     "imports-loader": "^5.0.0",
     "jest": "^29.5.0",
@@ -62,13 +62,18 @@
   },
   "dependencies": {
     "@emotion/css": "11.10.6",
-    "@grafana/data": "^11.3.0",
-    "@grafana/runtime": "^11.3.0",
-    "@grafana/ui": "^11.3.0",
-    "@grafana/schema": "^11.3.0",
+    "@grafana/data": "^12.4.0",
+    "@grafana/runtime": "^12.4.0",
+    "@grafana/ui": "^12.4.0",
+    "@grafana/schema": "^12.4.0",
     "react": "18.2.0",
     "react-dom": "18.2.0",
     "tslib": "2.5.3"
   },
-  "packageManager": "npm@9.8.1"
+  "packageManager": "npm@9.8.1",
+  "overrides": {
+    "serialize-javascript": "^7.0.3",
+    "minimatch": "^10.2.4",
+    "glob": "^13.0.6"
+  }
 }
