@@ -15,8 +15,9 @@ datasources:
     editable: true
     jsonData:
       url: https://192.168.49.2:8443
-      clientCert: "/root/kranklab-kubernetes-datasource/client.crt"
-      clientKey: "/root/kranklab-kubernetes-datasource/client.key"
-      caCert: "/root/kranklab-kubernetes-datasource/ca.crt"
+      certInputMode: token
+#      clientCert: "/root/kranklab-kubernetes-datasource/client.crt"
+#      clientKey: "/root/kranklab-kubernetes-datasource/client.key"
+#      caCert: "/root/kranklab-kubernetes-datasource/ca.crt"
     secureJsonData:
-      apiKey: 'api-key'
+      bearerToken: 'dummy-token-for-testing'

@@ -37,3 +37,6 @@ ci/
 .idea
 
 .eslintcache
+
+# Local test credentials (never commit)
+.env.test.local

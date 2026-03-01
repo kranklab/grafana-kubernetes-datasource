@@ -4,14 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
 	"github.com/grafana/grafana-plugin-sdk-go/backend/instancemgmt"
 	"github.com/grafana/grafana-plugin-sdk-go/data"
-	"github.com/kranklab/kubernetes-datasource/pkg/models"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
-	"log"
 	"strings"
 	"time"
 )
@@ -71,10 +70,63 @@ type queryModel struct {
 }
 
 type jsonData struct {
-	Url        string `json:"url"`
-	ClientCert string `json:"clientCert"`
-	ClientKey  string `json:"clientKey"`
-	CaCert     string `json:"caCert"`
+	Url            string `json:"url"`
+	ClientCert     string `json:"clientCert"`
+	ClientKey      string `json:"clientKey"`
+	CaCert         string `json:"caCert"`
+	CertInputMode  string `json:"certInputMode"`
+	CaCertMode     string `json:"caCertMode"`
+	AwsRegion      string `json:"awsRegion"`
+	EksClusterName string `json:"eksClusterName"`
+	AwsIamMode     string `json:"awsIamMode"`
+	AwsRoleArn     string `json:"awsRoleArn"`
+	AwsExternalId  string `json:"awsExternalId"`
+}
+
+func buildKubeConfig(ctx context.Context, data jsonData, secrets map[string]string) (*rest.Config, error) {
+	cfg := &rest.Config{Host: data.Url}
+	switch data.CertInputMode {
+	case "inline":
+		cfg.TLSClientConfig = rest.TLSClientConfig{
+			CertData: []byte(secrets["clientCertData"]),
+			KeyData:  []byte(secrets["clientKeyData"]),
+			CAData:   []byte(secrets["caCertData"]),
+		}
+	case "token":
+		cfg.BearerToken = strings.TrimSpace(secrets["bearerToken"])
+		if data.CaCertMode == "inline" {
+			cfg.TLSClientConfig = rest.TLSClientConfig{
+				CAData: []byte(secrets["caCertData"]),
+			}
+		} else {
+			cfg.TLSClientConfig = rest.TLSClientConfig{
+				CAFile: data.CaCert,
+			}
+		}
+	case "aws":
+		awsCfg, err := buildAWSConfig(ctx, data, secrets)
+		if err != nil {
+			return nil, fmt.Errorf("building AWS config: %w", err)
+		}
+		endpoint, caData, err := describeEKSCluster(ctx, data.EksClusterName, awsCfg)
+		if err != nil {
+			return nil, fmt.Errorf("describing EKS cluster: %w", err)
+		}
+		token, err := generateEKSToken(ctx, data.EksClusterName, awsCfg)
+		if err != nil {
+			return nil, fmt.Errorf("generating EKS token: %w", err)
+		}
+		cfg.Host = endpoint
+		cfg.BearerToken = token
+		cfg.TLSClientConfig = rest.TLSClientConfig{CAData: caData}
+	default: // "file"
+		cfg.TLSClientConfig = rest.TLSClientConfig{
+			CertFile: data.ClientCert,
+			KeyFile:  data.ClientKey,
+			CAFile:   data.CaCert,
+		}
+	}
+	return cfg, nil
 }
 
 // CustomObjectReference represents a simplified version of k8s ObjectReference
@@ -124,47 +176,88 @@ func (d *Datasource) query(ctx context.Context, pCtx backend.PluginContext, quer
 // The main use case for these health checks is the test button on the
 // datasource configuration page which allows users to verify that
 // a datasource is working as expected.
-func (d *Datasource) CheckHealth(_ context.Context, req *backend.CheckHealthRequest) (*backend.CheckHealthResult, error) {
-	res := &backend.CheckHealthResult{}
-	config, err := models.LoadPluginSettings(*req.PluginContext.DataSourceInstanceSettings)
+func (d *Datasource) CheckHealth(ctx context.Context, req *backend.CheckHealthRequest) (*backend.CheckHealthResult, error) {
+	var jd jsonData
+	if err := json.Unmarshal(req.PluginContext.DataSourceInstanceSettings.JSONData, &jd); err != nil {
+		return &backend.CheckHealthResult{
+			Status:  backend.HealthStatusError,
+			Message: fmt.Sprintf("Invalid configuration: %v", err),
+		}, nil
+	}
 
+	secrets := req.PluginContext.DataSourceInstanceSettings.DecryptedSecureJSONData
+
+	// For AWS mode, verify IAM credentials before attempting Kubernetes and capture the ARN.
+	var iamArn string
+	if jd.CertInputMode == "aws" {
+		awsCfg, err := buildAWSConfig(ctx, jd, secrets)
+		if err != nil {
+			return &backend.CheckHealthResult{
+				Status:  backend.HealthStatusError,
+				Message: fmt.Sprintf("AWS config error: %v", err),
+			}, nil
+		}
+		identity, err := sts.NewFromConfig(awsCfg).GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
+		if err != nil {
+			return &backend.CheckHealthResult{
+				Status:  backend.HealthStatusError,
+				Message: fmt.Sprintf("AWS credentials invalid: %v", err),
+			}, nil
+		}
+		if identity.Arn != nil {
+			iamArn = *identity.Arn
+		}
+	}
+
+	kubeConfig, err := buildKubeConfig(ctx, jd, secrets)
 	if err != nil {
-		res.Status = backend.HealthStatusError
-		res.Message = "Unable to load settings"
-		return res, nil
+		return &backend.CheckHealthResult{
+			Status:  backend.HealthStatusError,
+			Message: fmt.Sprintf("Failed to build kube config: %v", err),
+		}, nil
+	}
+	clientset, err := kubernetes.NewForConfig(kubeConfig)
+	if err != nil {
+		return &backend.CheckHealthResult{
+			Status:  backend.HealthStatusError,
+			Message: fmt.Sprintf("Failed to build Kubernetes client: %v", err),
+		}, nil
 	}
 
-	if config.Secrets.ApiKey == "" {
-		res.Status = backend.HealthStatusError
-		res.Message = "API key is missing"
-		return res, nil
+	version, err := clientset.Discovery().ServerVersion()
+	if err != nil {
+		return &backend.CheckHealthResult{
+			Status:  backend.HealthStatusError,
+			Message: fmt.Sprintf("Cannot reach Kubernetes API: %v", err),
+		}, nil
 	}
 
+	msg := fmt.Sprintf("Connected to Kubernetes %s", version.GitVersion)
+	if iamArn != "" {
+		msg += fmt.Sprintf(" (IAM: %s)", iamArn)
+	}
 	return &backend.CheckHealthResult{
 		Status:  backend.HealthStatusOk,
-		Message: "Data source is working",
+		Message: msg,
 	}, nil
 }
 
 func (d *Datasource) runListQuery(ctx context.Context, pCtx backend.PluginContext, qm queryModel) (*data.Frame, error) {
 
-	var data jsonData
-	err := json.Unmarshal(pCtx.DataSourceInstanceSettings.JSONData, &data)
+	var jd jsonData
+	err := json.Unmarshal(pCtx.DataSourceInstanceSettings.JSONData, &jd)
 	if err != nil {
 		return nil, err
 	}
 
-	// Create the clientset
-	clientset, err := kubernetes.NewForConfig(&rest.Config{
-		Host: data.Url,
-		TLSClientConfig: rest.TLSClientConfig{
-			CertFile: data.ClientCert,
-			KeyFile:  data.ClientKey,
-			CAFile:   data.CaCert,
-		},
-	})
+	secrets := pCtx.DataSourceInstanceSettings.DecryptedSecureJSONData
+	kubeConfig, err := buildKubeConfig(ctx, jd, secrets)
 	if err != nil {
-		log.Fatalf("Error creating Kubernetes client: %v", err)
+		return nil, err
+	}
+	clientset, err := kubernetes.NewForConfig(kubeConfig)
+	if err != nil {
+		return nil, err
 	}
 
 	namespace := qm.Namespace
@@ -228,24 +321,21 @@ func (d *Datasource) runListQuery(ctx context.Context, pCtx backend.PluginContex
 	return nil, fmt.Errorf("resource not recognized: %s", qm.Resource)
 }
 
-func (d *Datasource) runSummaryQuery(ctx context.Context, pCtx backend.PluginContext, qm queryModel) (*data.Frame, error) {
+func (d *Datasource) runSummaryQuery(ctx context.Context, pCtx backend.PluginContext, _ queryModel) (*data.Frame, error) {
 	var jdata jsonData
 	err := json.Unmarshal(pCtx.DataSourceInstanceSettings.JSONData, &jdata)
 	if err != nil {
 		return nil, err
 	}
 
-	// Create the clientset
-	clientset, err := kubernetes.NewForConfig(&rest.Config{
-		Host: jdata.Url,
-		TLSClientConfig: rest.TLSClientConfig{
-			CertFile: jdata.ClientCert,
-			KeyFile:  jdata.ClientKey,
-			CAFile:   jdata.CaCert,
-		},
-	})
+	secrets := pCtx.DataSourceInstanceSettings.DecryptedSecureJSONData
+	kubeConfig, err := buildKubeConfig(ctx, jdata, secrets)
 	if err != nil {
-		log.Fatalf("Error creating Kubernetes client: %v", err)
+		return nil, err
+	}
+	clientset, err := kubernetes.NewForConfig(kubeConfig)
+	if err != nil {
+		return nil, err
 	}
 
 	counts, err := getWorkloadCounts(ctx, clientset)
@@ -281,14 +371,12 @@ func (d *Datasource) runGetQuery(ctx context.Context, pCtx backend.PluginContext
 	if err := json.Unmarshal(pCtx.DataSourceInstanceSettings.JSONData, &jdata); err != nil {
 		return nil, err
 	}
-	clientset, err := kubernetes.NewForConfig(&rest.Config{
-		Host: jdata.Url,
-		TLSClientConfig: rest.TLSClientConfig{
-			CertFile: jdata.ClientCert,
-			KeyFile:  jdata.ClientKey,
-			CAFile:   jdata.CaCert,
-		},
-	})
+	secrets := pCtx.DataSourceInstanceSettings.DecryptedSecureJSONData
+	kubeConfig, err := buildKubeConfig(ctx, jdata, secrets)
+	if err != nil {
+		return nil, err
+	}
+	clientset, err := kubernetes.NewForConfig(kubeConfig)
 	if err != nil {
 		return nil, err
 	}
@@ -636,22 +724,22 @@ func getDaemonSetDetail(ctx context.Context, clientset *kubernetes.Clientset, na
 }
 
 func getStatefulSetDetail(ctx context.Context, clientset *kubernetes.Clientset, namespace, name string) (*data.Frame, error) {
-	sts, err := clientset.AppsV1().StatefulSets(namespace).Get(ctx, name, metav1.GetOptions{})
+	ss, err := clientset.AppsV1().StatefulSets(namespace).Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
 		return nil, err
 	}
 
 	frame := newDetailFrame()
-	frame.AppendRow("Name", sts.Name)
-	frame.AppendRow("Namespace", sts.Namespace)
-	frame.AppendRow("Replicas", fmt.Sprintf("%d", sts.Status.Replicas))
-	frame.AppendRow("Ready", fmt.Sprintf("%d", sts.Status.ReadyReplicas))
-	frame.AppendRow("Current", fmt.Sprintf("%d", sts.Status.CurrentReplicas))
-	frame.AppendRow("Labels", labelsToString(sts.Labels))
-	frame.AppendRow("Selector", labelsToString(sts.Spec.Selector.MatchLabels))
-	frame.AppendRow("Created", sts.CreationTimestamp.String())
+	frame.AppendRow("Name", ss.Name)
+	frame.AppendRow("Namespace", ss.Namespace)
+	frame.AppendRow("Replicas", fmt.Sprintf("%d", ss.Status.Replicas))
+	frame.AppendRow("Ready", fmt.Sprintf("%d", ss.Status.ReadyReplicas))
+	frame.AppendRow("Current", fmt.Sprintf("%d", ss.Status.CurrentReplicas))
+	frame.AppendRow("Labels", labelsToString(ss.Labels))
+	frame.AppendRow("Selector", labelsToString(ss.Spec.Selector.MatchLabels))
+	frame.AppendRow("Created", ss.CreationTimestamp.String())
 
-	for _, c := range sts.Spec.Template.Spec.Containers {
+	for _, c := range ss.Spec.Template.Spec.Containers {
 		frame.AppendRow("Container: "+c.Name, c.Image)
 	}
 

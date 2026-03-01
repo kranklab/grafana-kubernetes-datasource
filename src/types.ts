@@ -27,15 +27,27 @@ export interface DataSourceResponse {
  * These are options configured for each DataSource instance
  */
 export interface KubernetesDatasourceOptions extends DataSourceJsonData {
+  certInputMode?: 'file' | 'inline' | 'token' | 'aws';
+  caCertMode?: 'file' | 'inline';
   clientCert?: string;
   clientKey?: string;
   caCert?: string;
   url?: string;
+  awsRegion?: string;
+  eksClusterName?: string;
+  awsIamMode?: 'user' | 'role';
+  awsRoleArn?: string;
+  awsExternalId?: string;
 }
 
 /**
  * Value that is used in the backend, but never sent over HTTP to the frontend
  */
 export interface SecureJsonData {
-  apiKey?: string;
+  clientCertData?: string;
+  clientKeyData?: string;
+  caCertData?: string;
+  bearerToken?: string;
+  awsAccessKeyId?: string;
+  awsSecretAccessKey?: string;
 }
