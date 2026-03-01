@@ -1,60 +1,62 @@
 import React, { ChangeEvent } from 'react';
-import {InlineField, Input, Stack} from '@grafana/ui';
-import {QueryEditorProps} from '@grafana/data';
-import {DataSource} from '../datasource';
-import {KubernetesDatasourceOptions, KubernetesQuery} from '../types';
+import { InlineField, Input, Stack } from '@grafana/ui';
+import { QueryEditorProps } from '@grafana/data';
+import { DataSource } from '../datasource';
+import { KubernetesDatasourceOptions, KubernetesQuery } from '../types';
 
 type Props = QueryEditorProps<DataSource, KubernetesQuery, KubernetesDatasourceOptions>;
 
-export function QueryEditor({query, onChange, onRunQuery}: Props) {
+export function QueryEditor({ query, onChange, onRunQuery }: Props) {
+  const isGet = query.action === 'get';
 
-    return (
-        <Stack gap={0}>
-            <InlineField label="Action">
-                <Input
-                    id="query-editor-action-text"
-                    onChange={(event: ChangeEvent<HTMLInputElement>) => {
-                        onChange({
-                            ...query,
-                            action: event.target.value
-                        })
-                        onRunQuery()
-                    }}
-                    value={query.action || ''}
-                    required
-                    placeholder="Enter a action name"
-                />
+  const update = (patch: Partial<KubernetesQuery>) => {
+    onChange({ ...query, ...patch });
+    onRunQuery();
+  };
+
+  return (
+    <Stack gap={0}>
+      <InlineField label="Action">
+        <Input
+          id="query-editor-action"
+          onChange={(e: ChangeEvent<HTMLInputElement>) => update({ action: e.target.value })}
+          value={query.action || ''}
+          placeholder="list / get / summary"
+          width={12}
+        />
       </InlineField>
-            <InlineField label="Namespace">
-                <Input
-                    id="query-editor-namespace-text"
-                    onChange={(event: ChangeEvent<HTMLInputElement>) => {
-                        onChange({
-                            ...query,
-                            namespace: event.target.value
-                        })
-                        onRunQuery()
-                    }}
-                    value={query.namespace || ''}
-                    required
-                    placeholder="Enter a namespace name"
-                />
+
+      <InlineField label="Namespace">
+        <Input
+          id="query-editor-namespace"
+          onChange={(e: ChangeEvent<HTMLInputElement>) => update({ namespace: e.target.value })}
+          value={query.namespace || ''}
+          placeholder="default"
+          width={16}
+        />
       </InlineField>
-            <InlineField label="Resource">
-                <Input
-                    id="query-editor-resource-text"
-                    onChange={(event: ChangeEvent<HTMLInputElement>) => {
-                        onChange({
-                            ...query,
-                            resource: event.target.value
-                        })
-                        onRunQuery()
-                    }}
-                    value={query.resource || ''}
-                    required
-                    placeholder="Enter a resource name"
-                />
+
+      <InlineField label="Resource">
+        <Input
+          id="query-editor-resource"
+          onChange={(e: ChangeEvent<HTMLInputElement>) => update({ resource: e.target.value })}
+          value={query.resource || ''}
+          placeholder="pods / deployments / ..."
+          width={16}
+        />
       </InlineField>
+
+      {isGet && (
+        <InlineField label="Name">
+          <Input
+            id="query-editor-name"
+            onChange={(e: ChangeEvent<HTMLInputElement>) => update({ name: e.target.value })}
+            value={query.name || ''}
+            placeholder="resource name"
+            width={20}
+          />
+        </InlineField>
+      )}
     </Stack>
   );
 }

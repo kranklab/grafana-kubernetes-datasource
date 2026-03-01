@@ -2,15 +2,16 @@ import { DataSourceJsonData } from '@grafana/data';
 import { DataQuery } from '@grafana/schema';
 
 export interface KubernetesQuery extends DataQuery {
-  action: string | 'get' | 'describe';
+  action: string | 'get' | 'list' | 'summary';
   namespace: string;
-  resource: string | 'pod';
+  resource: string;
+  name?: string;
 }
 
 export const DEFAULT_QUERY: Partial<KubernetesQuery> = {
-  action: "get",
+  action: 'list',
   namespace: 'default',
-  resource: 'pod'
+  resource: 'pods',
 };
 
 export interface DataPoint {
