@@ -178,16 +178,18 @@ jobs:
         run: npm run e2e
 
       - name: Docker logs
-        if: ${{ always() && steps.run-tests.outcome == 'failure' }}
+        if: ${{ failure() }}
         run: |
           docker logs kranklab-kubernetes-datasource >& grafana-server.log
+          docker ps -a
 
       - name: Stop grafana docker
+        if: ${{ always() }}
         run: docker compose down
 
       - name: Upload server log
         uses: actions/upload-artifact@v4
-        if: ${{ always() && steps.run-tests.outcome == 'failure' }}
+        if: ${{ failure() }}
         with:
           name: ${{ matrix.GRAFANA_IMAGE.NAME }}-v${{ matrix.GRAFANA_IMAGE.VERSION }}-${{github.run_id}}-server-log
           path: grafana-server.log
