@@ -164,22 +164,11 @@ jobs:
 
       - name: Start Grafana
         run: |
-          docker compose -f docker-compose.yaml pull
-          DEVELOPMENT=false GRAFANA_VERSION=${{ matrix.GRAFANA_IMAGE.VERSION }} GRAFANA_IMAGE=${{ matrix.GRAFANA_IMAGE.NAME }} docker compose -f docker-compose.yaml up -d
+          docker compose pull
+          DEVELOPMENT=false GRAFANA_VERSION=${{ matrix.GRAFANA_IMAGE.VERSION }} GRAFANA_IMAGE=${{ matrix.GRAFANA_IMAGE.NAME }} docker compose up -d
 
       - name: Wait for grafana server
-        id: wait-for-grafana
         uses: grafana/plugin-actions/wait-for-grafana@main
-
-      - name: Debug - Grafana startup logs
-        if: ${{ failure() && steps.wait-for-grafana.outcome == 'failure' }}
-        run: |
-          echo "=== Container status ==="
-          docker ps -a
-          echo "=== Container logs ==="
-          docker logs kranklab-kubernetes-datasource 2>&1
-          echo "=== Port 3000 listeners ==="
-          ss -tlnp | grep 3000 || echo "Nothing listening on 3000"
 
       - name: Install Playwright Browsers
         run: npm exec playwright install chromium --with-deps
@@ -189,17 +178,16 @@ jobs:
         run: npm run e2e
 
       - name: Docker logs
-        if: ${{ always() && (steps.run-tests.outcome == 'failure' || steps.wait-for-grafana.outcome == 'failure') }}
+        if: ${{ always() && steps.run-tests.outcome == 'failure' }}
         run: |
           docker logs kranklab-kubernetes-datasource >& grafana-server.log
 
       - name: Stop grafana docker
-        if: always()
-        run: docker compose -f docker-compose.yaml down
+        run: docker compose down
 
       - name: Upload server log
         uses: actions/upload-artifact@v4
-        if: ${{ always() && (steps.run-tests.outcome == 'failure' || steps.wait-for-grafana.outcome == 'failure') }}
+        if: ${{ always() && steps.run-tests.outcome == 'failure' }}
         with:
           name: ${{ matrix.GRAFANA_IMAGE.NAME }}-v${{ matrix.GRAFANA_IMAGE.VERSION }}-${{github.run_id}}-server-log
           path: grafana-server.log
