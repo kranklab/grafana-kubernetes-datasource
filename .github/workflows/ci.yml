@@ -167,6 +167,14 @@ jobs:
           docker compose pull
           DEVELOPMENT=false GRAFANA_VERSION=${{ matrix.GRAFANA_IMAGE.VERSION }} GRAFANA_IMAGE=${{ matrix.GRAFANA_IMAGE.NAME }} docker compose up -d
 
+      - name: Show early Grafana logs
+        run: |
+          sleep 10
+          echo "=== Container status ==="
+          docker ps -a
+          echo "=== Grafana logs ==="
+          docker logs kranklab-kubernetes-datasource 2>&1 || echo "Container not found or no logs"
+
       - name: Wait for grafana server
         uses: grafana/plugin-actions/wait-for-grafana@main
 
@@ -180,8 +188,8 @@ jobs:
       - name: Docker logs
         if: ${{ failure() }}
         run: |
-          docker logs kranklab-kubernetes-datasource >& grafana-server.log
           docker ps -a
+          docker logs kranklab-kubernetes-datasource 2>&1 | tee grafana-server.log
 
       - name: Stop grafana docker
         if: ${{ always() }}
