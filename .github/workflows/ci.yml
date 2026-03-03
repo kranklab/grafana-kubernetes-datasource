@@ -164,8 +164,8 @@ jobs:
 
       - name: Start Grafana
         run: |
-          docker compose pull
-          DEVELOPMENT=false GRAFANA_VERSION=${{ matrix.GRAFANA_IMAGE.VERSION }} GRAFANA_IMAGE=${{ matrix.GRAFANA_IMAGE.NAME }} docker compose up -d
+          docker compose -f docker-compose.yaml pull
+          DEVELOPMENT=false GRAFANA_VERSION=${{ matrix.GRAFANA_IMAGE.VERSION }} GRAFANA_IMAGE=${{ matrix.GRAFANA_IMAGE.NAME }} docker compose -f docker-compose.yaml up -d
 
       - name: Wait for grafana server
         uses: grafana/plugin-actions/wait-for-grafana@main
@@ -183,7 +183,7 @@ jobs:
           docker logs kranklab-kubernetes-datasource >& grafana-server.log
 
       - name: Stop grafana docker
-        run: docker compose down
+        run: docker compose -f docker-compose.yaml down
 
       - name: Upload server log
         uses: actions/upload-artifact@v4
