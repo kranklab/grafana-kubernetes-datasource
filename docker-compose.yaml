@@ -20,8 +20,6 @@ services:
     network_mode: host
     volumes:
       - ./dist:/var/lib/grafana/plugins/kranklab-kubernetes-datasource
-      - ../kranklab-kubernetesdashboard-app/dist:/var/lib/grafana/plugins/kranklab-kubernetesdashboard-app
-      - ../kranklab-kubernetes-panel/dist:/var/lib/grafana/plugins/kranklab-kubernetes-panel
       - ./provisioning:/etc/grafana/provisioning
       - .:/root/kranklab-kubernetes-datasource
 
@@ -30,5 +28,4 @@ services:
       GF_LOG_FILTERS: plugin.kranklab-kubernetes-datasource:debug
       GF_LOG_LEVEL: debug
       GF_DATAPROXY_LOGGING: "1"
-      GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS: kranklab-kubernetes-datasource,kranklab-kubernetes-panel,kranklab-kubernetesdashboard-app
-      GF_INSTALL_PLUGINS: grafana-polystat-panel
+      GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS: kranklab-kubernetes-datasource

@@ -40,3 +40,4 @@ ci/
 
 # Local test credentials (never commit)
 .env.test.local
+docker-compose.override.yaml
