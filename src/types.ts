@@ -6,6 +6,8 @@ export interface KubernetesQuery extends DataQuery {
   namespace: string;
   resource: string;
   name?: string;
+  labelSelector?: string;
+  nodeName?: string;
 }
 
 export const DEFAULT_QUERY: Partial<KubernetesQuery> = {
