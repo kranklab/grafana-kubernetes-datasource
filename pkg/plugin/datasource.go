@@ -63,10 +63,12 @@ func (d *Datasource) QueryData(ctx context.Context, req *backend.QueryDataReques
 }
 
 type queryModel struct {
-	Action    string `json:"action"`
-	Resource  string `json:"resource"`
-	Namespace string `json:"namespace"`
-	Name      string `json:"name"`
+	Action        string `json:"action"`
+	Resource      string `json:"resource"`
+	Namespace     string `json:"namespace"`
+	Name          string `json:"name"`
+	LabelSelector string `json:"labelSelector"`
+	NodeName      string `json:"nodeName"`
 }
 
 type jsonData struct {
@@ -265,57 +267,64 @@ func (d *Datasource) runListQuery(ctx context.Context, pCtx backend.PluginContex
 		namespace = ""
 	}
 
+	listOpts := metav1.ListOptions{
+		LabelSelector: qm.LabelSelector,
+	}
+	if qm.NodeName != "" && (qm.Resource == "pod" || qm.Resource == "pods") {
+		listOpts.FieldSelector = "spec.nodeName=" + qm.NodeName
+	}
+
 	switch qm.Resource {
 	case "pod", "pods":
-		return getPods(ctx, clientset, namespace)
+		return getPods(ctx, clientset, namespace, listOpts)
 	case "deployments":
-		return getDeployments(ctx, clientset, namespace)
+		return getDeployments(ctx, clientset, namespace, listOpts)
 	case "daemonsets":
-		return getDeamonSets(ctx, clientset, namespace)
+		return getDeamonSets(ctx, clientset, namespace, listOpts)
 	case "statefulsets":
-		return getStatefulSets(ctx, clientset, namespace)
+		return getStatefulSets(ctx, clientset, namespace, listOpts)
 	case "replicasets":
-		return getReplicaSets(ctx, clientset, namespace)
+		return getReplicaSets(ctx, clientset, namespace, listOpts)
 	case "jobs":
-		return getJobs(ctx, clientset, namespace)
+		return getJobs(ctx, clientset, namespace, listOpts)
 	case "cronjobs":
-		return getCronJobs(ctx, clientset, namespace)
+		return getCronJobs(ctx, clientset, namespace, listOpts)
 	case "namespaces":
-		return getNamespaces(ctx, clientset)
+		return getNamespaces(ctx, clientset, listOpts)
 	case "services", "svc":
-		return getServices(ctx, clientset, namespace)
+		return getServices(ctx, clientset, namespace, listOpts)
 	case "ingresses", "ingress":
-		return getIngresses(ctx, clientset, namespace)
+		return getIngresses(ctx, clientset, namespace, listOpts)
 	case "ingressclasses", "ingressclass":
-		return getIngressClasses(ctx, clientset)
+		return getIngressClasses(ctx, clientset, listOpts)
 	case "configmaps", "configmap":
-		return getConfigMaps(ctx, clientset, namespace)
+		return getConfigMaps(ctx, clientset, namespace, listOpts)
 	case "secrets", "secret":
-		return getSecrets(ctx, clientset, namespace)
+		return getSecrets(ctx, clientset, namespace, listOpts)
 	case "persistentvolumeclaims", "pvc":
-		return getPersistentVolumeClaims(ctx, clientset, namespace)
+		return getPersistentVolumeClaims(ctx, clientset, namespace, listOpts)
 	case "storageclasses", "storageclass":
-		return getStorageClasses(ctx, clientset)
+		return getStorageClasses(ctx, clientset, listOpts)
 	case "crds", "crd", "customresourcedefinitions":
-		return getCRDs(ctx, clientset)
+		return getCRDs(ctx, clientset, listOpts)
 	case "clusterrolebindings", "clusterrolebinding":
-		return getClusterRoleBindings(ctx, clientset)
+		return getClusterRoleBindings(ctx, clientset, listOpts)
 	case "clusterroles", "clusterrole":
-		return getClusterRoles(ctx, clientset)
+		return getClusterRoles(ctx, clientset, listOpts)
 	case "events", "event":
-		return getEvents(ctx, clientset, namespace)
+		return getEvents(ctx, clientset, namespace, listOpts)
 	case "networkpolicies", "networkpolicy":
-		return getNetworkPolicies(ctx, clientset, namespace)
+		return getNetworkPolicies(ctx, clientset, namespace, listOpts)
 	case "nodes", "node":
-		return getNodes(ctx, clientset)
+		return getNodes(ctx, clientset, listOpts)
 	case "persistentvolumes", "pv":
-		return getPersistentVolumes(ctx, clientset)
+		return getPersistentVolumes(ctx, clientset, listOpts)
 	case "rolebindings", "rolebinding":
-		return getRoleBindings(ctx, clientset, namespace)
+		return getRoleBindings(ctx, clientset, namespace, listOpts)
 	case "roles", "role":
-		return getRoles(ctx, clientset, namespace)
+		return getRoles(ctx, clientset, namespace, listOpts)
 	case "serviceaccounts", "serviceaccount", "sa":
-		return getServiceAccounts(ctx, clientset, namespace)
+		return getServiceAccounts(ctx, clientset, namespace, listOpts)
 	}
 
 	return nil, fmt.Errorf("resource not recognized: %s", qm.Resource)
@@ -343,10 +352,10 @@ func (d *Datasource) runSummaryQuery(ctx context.Context, pCtx backend.PluginCon
 		return nil, err
 	}
 
-	frame := data.NewFrame("response",
-		data.NewField("name", nil, []string{}),
-		data.NewField("total", nil, []int32{}),
-		data.NewField("failed", nil, []int32{}),
+	frame := data.NewFrame("Workloads",
+		data.NewField("Name", nil, []string{}),
+		data.NewField("Total", nil, []int32{}),
+		data.NewField("Failed", nil, []int32{}),
 	)
 
 	frame.AppendRow("pod", int32(counts.Pods.Total), int32(counts.Pods.Failed))
@@ -409,9 +418,9 @@ func (d *Datasource) runGetQuery(ctx context.Context, pCtx backend.PluginContext
 
 // newDetailFrame returns a frame with "property" and "value" columns for detail views.
 func newDetailFrame() *data.Frame {
-	return data.NewFrame("response",
-		data.NewField("property", nil, []string{}),
-		data.NewField("value", nil, []string{}),
+	return data.NewFrame("Workloads",
+		data.NewField("Property", nil, []string{}),
+		data.NewField("Value", nil, []string{}),
 	)
 }
 
@@ -450,21 +459,21 @@ func getPodDetail(ctx context.Context, clientset *kubernetes.Clientset, namespac
 	annotationsJSON, _ := json.Marshal(pod.Annotations)
 
 	metaFrame := data.NewFrame("meta",
-		data.NewField("name", nil, []string{}),
-		data.NewField("namespace", nil, []string{}),
-		data.NewField("uid", nil, []string{}),
-		data.NewField("created", nil, []time.Time{}),
-		data.NewField("ownerKind", nil, []string{}),
-		data.NewField("ownerName", nil, []string{}),
-		data.NewField("labels", nil, []json.RawMessage{}),
-		data.NewField("annotations", nil, []json.RawMessage{}),
-		data.NewField("node", nil, []string{}),
-		data.NewField("status", nil, []string{}),
-		data.NewField("ip", nil, []string{}),
-		data.NewField("qosClass", nil, []string{}),
-		data.NewField("restarts", nil, []int32{}),
-		data.NewField("serviceAccount", nil, []string{}),
-		data.NewField("imagePullSecrets", nil, []json.RawMessage{}),
+		data.NewField("Name", nil, []string{}),
+		data.NewField("Namespace", nil, []string{}),
+		data.NewField("UID", nil, []string{}),
+		data.NewField("Created", nil, []time.Time{}),
+		data.NewField("Owner Kind", nil, []string{}),
+		data.NewField("Owner Name", nil, []string{}),
+		data.NewField("Labels", nil, []json.RawMessage{}),
+		data.NewField("Annotations", nil, []json.RawMessage{}),
+		data.NewField("Node", nil, []string{}),
+		data.NewField("Status", nil, []string{}),
+		data.NewField("IP", nil, []string{}),
+		data.NewField("QoS Class", nil, []string{}),
+		data.NewField("Restarts", nil, []int32{}),
+		data.NewField("Service Account", nil, []string{}),
+		data.NewField("Image Pull Secrets", nil, []json.RawMessage{}),
 	)
 	setDetailMeta(metaFrame)
 	metaFrame.AppendRow(
@@ -476,12 +485,12 @@ func getPodDetail(ctx context.Context, clientset *kubernetes.Clientset, namespac
 	)
 
 	condFrame := data.NewFrame("conditions",
-		data.NewField("type", nil, []string{}),
-		data.NewField("status", nil, []string{}),
-		data.NewField("lastProbeTime", nil, []*time.Time{}),
-		data.NewField("lastTransitionTime", nil, []*time.Time{}),
-		data.NewField("reason", nil, []string{}),
-		data.NewField("message", nil, []string{}),
+		data.NewField("Type", nil, []string{}),
+		data.NewField("Status", nil, []string{}),
+		data.NewField("Last Probe Time", nil, []*time.Time{}),
+		data.NewField("Last Transition Time", nil, []*time.Time{}),
+		data.NewField("Reason", nil, []string{}),
+		data.NewField("Message", nil, []string{}),
 	)
 	setDetailMeta(condFrame)
 	for _, cond := range pod.Status.Conditions {
@@ -498,14 +507,14 @@ func getPodDetail(ctx context.Context, clientset *kubernetes.Clientset, namespac
 	}
 
 	evtFrame := data.NewFrame("events",
-		data.NewField("name", nil, []string{}),
-		data.NewField("reason", nil, []string{}),
-		data.NewField("message", nil, []string{}),
-		data.NewField("source", nil, []string{}),
-		data.NewField("subObject", nil, []string{}),
-		data.NewField("count", nil, []int32{}),
-		data.NewField("firstSeen", nil, []time.Time{}),
-		data.NewField("lastSeen", nil, []time.Time{}),
+		data.NewField("Name", nil, []string{}),
+		data.NewField("Reason", nil, []string{}),
+		data.NewField("Message", nil, []string{}),
+		data.NewField("Source", nil, []string{}),
+		data.NewField("Sub Object", nil, []string{}),
+		data.NewField("Count", nil, []int32{}),
+		data.NewField("First Seen", nil, []time.Time{}),
+		data.NewField("Last Seen", nil, []time.Time{}),
 	)
 	setDetailMeta(evtFrame)
 	events, _ := clientset.CoreV1().Events(namespace).List(ctx, metav1.ListOptions{
@@ -577,19 +586,19 @@ func getPodDetail(ctx context.Context, clientset *kubernetes.Clientset, namespac
 	}
 
 	containersFrame := data.NewFrame("containers",
-		data.NewField("name", nil, []string{}),
-		data.NewField("image", nil, []string{}),
-		data.NewField("ready", nil, []bool{}),
-		data.NewField("started", nil, []bool{}),
-		data.NewField("reason", nil, []string{}),
-		data.NewField("env", nil, []json.RawMessage{}),
-		data.NewField("command", nil, []json.RawMessage{}),
-		data.NewField("args", nil, []json.RawMessage{}),
-		data.NewField("mounts", nil, []json.RawMessage{}),
-		data.NewField("readinessProbe", nil, []json.RawMessage{}),
-		data.NewField("securityContext", nil, []json.RawMessage{}),
-		data.NewField("limits", nil, []json.RawMessage{}),
-		data.NewField("requests", nil, []json.RawMessage{}),
+		data.NewField("Name", nil, []string{}),
+		data.NewField("Image", nil, []string{}),
+		data.NewField("Ready", nil, []bool{}),
+		data.NewField("Started", nil, []bool{}),
+		data.NewField("Reason", nil, []string{}),
+		data.NewField("Env", nil, []json.RawMessage{}),
+		data.NewField("Command", nil, []json.RawMessage{}),
+		data.NewField("Args", nil, []json.RawMessage{}),
+		data.NewField("Mounts", nil, []json.RawMessage{}),
+		data.NewField("Readiness Probe", nil, []json.RawMessage{}),
+		data.NewField("Security Context", nil, []json.RawMessage{}),
+		data.NewField("Limits", nil, []json.RawMessage{}),
+		data.NewField("Requests", nil, []json.RawMessage{}),
 	)
 	setDetailMeta(containersFrame)
 
@@ -801,22 +810,22 @@ func getNodeDetail(ctx context.Context, clientset *kubernetes.Clientset, name st
 	return frame, nil
 }
 
-func getDeployments(ctx context.Context, clientset *kubernetes.Clientset, namespace string) (*data.Frame, error) {
+func getDeployments(ctx context.Context, clientset *kubernetes.Clientset, namespace string, listOpts metav1.ListOptions) (*data.Frame, error) {
 
-	list, err := clientset.AppsV1().Deployments(namespace).List(ctx, metav1.ListOptions{})
+	list, err := clientset.AppsV1().Deployments(namespace).List(ctx, listOpts)
 	if err != nil {
 		return nil, err
 	}
 
-	frame := data.NewFrame("response",
-		data.NewField("name", nil, []string{}),
-		data.NewField("namespace", nil, []string{}),
-		data.NewField("status", nil, []string{}),
-		data.NewField("images", nil, []json.RawMessage{}),
-		data.NewField("labels", nil, []json.RawMessage{}),
-		data.NewField("target", nil, []int32{}),
-		data.NewField("available", nil, []int32{}),
-		data.NewField("created", nil, []time.Time{}),
+	frame := data.NewFrame("Workloads",
+		data.NewField("Name", nil, []string{}),
+		data.NewField("Namespace", nil, []string{}),
+		data.NewField("Status", nil, []string{}),
+		data.NewField("Images", nil, []json.RawMessage{}),
+		data.NewField("Labels", nil, []json.RawMessage{}),
+		data.NewField("Target", nil, []int32{}),
+		data.NewField("Available", nil, []int32{}),
+		data.NewField("Created", nil, []time.Time{}),
 	)
 
 	for _, pod := range list.Items {
@@ -839,22 +848,22 @@ func getDeployments(ctx context.Context, clientset *kubernetes.Clientset, namesp
 }
 
 // getDaemonsets retrieves daemonsets
-func getDeamonSets(ctx context.Context, clientset *kubernetes.Clientset, namespace string) (*data.Frame, error) {
+func getDeamonSets(ctx context.Context, clientset *kubernetes.Clientset, namespace string, listOpts metav1.ListOptions) (*data.Frame, error) {
 
-	list, err := clientset.AppsV1().DaemonSets(namespace).List(ctx, metav1.ListOptions{})
+	list, err := clientset.AppsV1().DaemonSets(namespace).List(ctx, listOpts)
 	if err != nil {
 		return nil, err
 	}
 
-	frame := data.NewFrame("response",
-		data.NewField("name", nil, []string{}),
-		data.NewField("namespace", nil, []string{}),
-		data.NewField("status", nil, []string{}),
-		data.NewField("images", nil, []json.RawMessage{}),
-		data.NewField("labels", nil, []json.RawMessage{}),
-		data.NewField("target", nil, []int32{}),
-		data.NewField("available", nil, []int32{}),
-		data.NewField("created", nil, []time.Time{}),
+	frame := data.NewFrame("Workloads",
+		data.NewField("Name", nil, []string{}),
+		data.NewField("Namespace", nil, []string{}),
+		data.NewField("Status", nil, []string{}),
+		data.NewField("Images", nil, []json.RawMessage{}),
+		data.NewField("Labels", nil, []json.RawMessage{}),
+		data.NewField("Target", nil, []int32{}),
+		data.NewField("Available", nil, []int32{}),
+		data.NewField("Created", nil, []time.Time{}),
 	)
 
 	for _, pod := range list.Items {
@@ -877,22 +886,22 @@ func getDeamonSets(ctx context.Context, clientset *kubernetes.Clientset, namespa
 }
 
 // getStatefulsets retrieves statefulsets
-func getStatefulSets(ctx context.Context, clientset *kubernetes.Clientset, namespace string) (*data.Frame, error) {
+func getStatefulSets(ctx context.Context, clientset *kubernetes.Clientset, namespace string, listOpts metav1.ListOptions) (*data.Frame, error) {
 
-	list, err := clientset.AppsV1().StatefulSets(namespace).List(ctx, metav1.ListOptions{})
+	list, err := clientset.AppsV1().StatefulSets(namespace).List(ctx, listOpts)
 	if err != nil {
 		return nil, err
 	}
 
-	frame := data.NewFrame("response",
-		data.NewField("name", nil, []string{}),
-		data.NewField("namespace", nil, []string{}),
-		data.NewField("status", nil, []string{}),
-		data.NewField("images", nil, []json.RawMessage{}),
-		data.NewField("labels", nil, []json.RawMessage{}),
-		data.NewField("target", nil, []int32{}),
-		data.NewField("available", nil, []int32{}),
-		data.NewField("created", nil, []time.Time{}),
+	frame := data.NewFrame("Workloads",
+		data.NewField("Name", nil, []string{}),
+		data.NewField("Namespace", nil, []string{}),
+		data.NewField("Status", nil, []string{}),
+		data.NewField("Images", nil, []json.RawMessage{}),
+		data.NewField("Labels", nil, []json.RawMessage{}),
+		data.NewField("Target", nil, []int32{}),
+		data.NewField("Available", nil, []int32{}),
+		data.NewField("Created", nil, []time.Time{}),
 	)
 
 	for _, pod := range list.Items {
@@ -915,22 +924,22 @@ func getStatefulSets(ctx context.Context, clientset *kubernetes.Clientset, names
 }
 
 // getReplicasets retrieves replicasets
-func getReplicaSets(ctx context.Context, clientset *kubernetes.Clientset, namespace string) (*data.Frame, error) {
+func getReplicaSets(ctx context.Context, clientset *kubernetes.Clientset, namespace string, listOpts metav1.ListOptions) (*data.Frame, error) {
 
-	list, err := clientset.AppsV1().ReplicaSets(namespace).List(ctx, metav1.ListOptions{})
+	list, err := clientset.AppsV1().ReplicaSets(namespace).List(ctx, listOpts)
 	if err != nil {
 		return nil, err
 	}
 
-	frame := data.NewFrame("response",
-		data.NewField("name", nil, []string{}),
-		data.NewField("namespace", nil, []string{}),
-		data.NewField("status", nil, []string{}),
-		data.NewField("images", nil, []json.RawMessage{}),
-		data.NewField("labels", nil, []json.RawMessage{}),
-		data.NewField("target", nil, []int32{}),
-		data.NewField("available", nil, []int32{}),
-		data.NewField("created", nil, []time.Time{}),
+	frame := data.NewFrame("Workloads",
+		data.NewField("Name", nil, []string{}),
+		data.NewField("Namespace", nil, []string{}),
+		data.NewField("Status", nil, []string{}),
+		data.NewField("Images", nil, []json.RawMessage{}),
+		data.NewField("Labels", nil, []json.RawMessage{}),
+		data.NewField("Target", nil, []int32{}),
+		data.NewField("Available", nil, []int32{}),
+		data.NewField("Created", nil, []time.Time{}),
 	)
 
 	for _, pod := range list.Items {
@@ -953,22 +962,22 @@ func getReplicaSets(ctx context.Context, clientset *kubernetes.Clientset, namesp
 }
 
 // getJobs retrieves kubernetes jobs
-func getJobs(ctx context.Context, clientset *kubernetes.Clientset, namespace string) (*data.Frame, error) {
+func getJobs(ctx context.Context, clientset *kubernetes.Clientset, namespace string, listOpts metav1.ListOptions) (*data.Frame, error) {
 
-	list, err := clientset.BatchV1().Jobs(namespace).List(ctx, metav1.ListOptions{})
+	list, err := clientset.BatchV1().Jobs(namespace).List(ctx, listOpts)
 	if err != nil {
 		return nil, err
 	}
 
-	frame := data.NewFrame("response",
-		data.NewField("name", nil, []string{}),
-		data.NewField("namespace", nil, []string{}),
-		data.NewField("status", nil, []string{}),
-		data.NewField("images", nil, []json.RawMessage{}),
-		data.NewField("labels", nil, []json.RawMessage{}),
-		data.NewField("succeeded", nil, []int32{}),
-		data.NewField("completed", nil, []*int32{}),
-		data.NewField("created", nil, []time.Time{}),
+	frame := data.NewFrame("Workloads",
+		data.NewField("Name", nil, []string{}),
+		data.NewField("Namespace", nil, []string{}),
+		data.NewField("Status", nil, []string{}),
+		data.NewField("Images", nil, []json.RawMessage{}),
+		data.NewField("Labels", nil, []json.RawMessage{}),
+		data.NewField("Succeeded", nil, []int32{}),
+		data.NewField("Completed", nil, []*int32{}),
+		data.NewField("Created", nil, []time.Time{}),
 	)
 
 	for _, itm := range list.Items {
@@ -991,14 +1000,14 @@ func getJobs(ctx context.Context, clientset *kubernetes.Clientset, namespace str
 }
 
 // getNamespaces retrieves all namespaces in the cluster
-func getNamespaces(ctx context.Context, clientset *kubernetes.Clientset) (*data.Frame, error) {
-	list, err := clientset.CoreV1().Namespaces().List(ctx, metav1.ListOptions{})
+func getNamespaces(ctx context.Context, clientset *kubernetes.Clientset, listOpts metav1.ListOptions) (*data.Frame, error) {
+	list, err := clientset.CoreV1().Namespaces().List(ctx, listOpts)
 	if err != nil {
 		return nil, err
 	}
 
-	frame := data.NewFrame("response",
-		data.NewField("name", nil, []string{}),
+	frame := data.NewFrame("Workloads",
+		data.NewField("Name", nil, []string{}),
 	)
 
 	for _, ns := range list.Items {
@@ -1009,24 +1018,24 @@ func getNamespaces(ctx context.Context, clientset *kubernetes.Clientset) (*data.
 }
 
 // getCronJobs retrieves kubernetes jobs
-func getCronJobs(ctx context.Context, clientset *kubernetes.Clientset, namespace string) (*data.Frame, error) {
+func getCronJobs(ctx context.Context, clientset *kubernetes.Clientset, namespace string, listOpts metav1.ListOptions) (*data.Frame, error) {
 
-	list, err := clientset.BatchV1().CronJobs(namespace).List(ctx, metav1.ListOptions{})
+	list, err := clientset.BatchV1().CronJobs(namespace).List(ctx, listOpts)
 	if err != nil {
 		return nil, err
 	}
 
-	frame := data.NewFrame("response",
-		data.NewField("name", nil, []string{}),
-		data.NewField("namespace", nil, []string{}),
-		data.NewField("status", nil, []string{}),
-		data.NewField("images", nil, []json.RawMessage{}),
-		data.NewField("labels", nil, []json.RawMessage{}),
-		data.NewField("schedule", nil, []string{}),
-		data.NewField("suspend", nil, []*bool{}),
-		data.NewField("active", nil, []int32{}),
-		data.NewField("lastscheduled", nil, []*time.Time{}),
-		data.NewField("created", nil, []time.Time{}),
+	frame := data.NewFrame("Workloads",
+		data.NewField("Name", nil, []string{}),
+		data.NewField("Namespace", nil, []string{}),
+		data.NewField("Status", nil, []string{}),
+		data.NewField("Images", nil, []json.RawMessage{}),
+		data.NewField("Labels", nil, []json.RawMessage{}),
+		data.NewField("Schedule", nil, []string{}),
+		data.NewField("Suspend", nil, []*bool{}),
+		data.NewField("Active", nil, []int32{}),
+		data.NewField("Last Scheduled", nil, []*time.Time{}),
+		data.NewField("Created", nil, []time.Time{}),
 	)
 
 	for _, itm := range list.Items {
@@ -1056,21 +1065,21 @@ func getCronJobs(ctx context.Context, clientset *kubernetes.Clientset, namespace
 }
 
 // getPods retrieves pods from the specified namespace (or all namespaces if namespace is empty)
-func getPods(ctx context.Context, clientset *kubernetes.Clientset, namespace string) (*data.Frame, error) {
+func getPods(ctx context.Context, clientset *kubernetes.Clientset, namespace string, listOpts metav1.ListOptions) (*data.Frame, error) {
 
-	list, err := clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{})
+	list, err := clientset.CoreV1().Pods(namespace).List(ctx, listOpts)
 	if err != nil {
 		return nil, err
 	}
-	frame := data.NewFrame("response",
-		data.NewField("name", nil, []string{}),
-		data.NewField("namespace", nil, []string{}),
-		data.NewField("images", nil, []json.RawMessage{}),
-		data.NewField("labels", nil, []json.RawMessage{}),
-		data.NewField("node", nil, []string{}),
-		data.NewField("status", nil, []string{}),
-		data.NewField("restarts", nil, []int32{}),
-		data.NewField("created", nil, []time.Time{}),
+	frame := data.NewFrame("Workloads",
+		data.NewField("Name", nil, []string{}),
+		data.NewField("Namespace", nil, []string{}),
+		data.NewField("Images", nil, []json.RawMessage{}),
+		data.NewField("Labels", nil, []json.RawMessage{}),
+		data.NewField("Node", nil, []string{}),
+		data.NewField("Status", nil, []string{}),
+		data.NewField("Restarts", nil, []int32{}),
+		data.NewField("Created", nil, []time.Time{}),
 	)
 
 	for _, pod := range list.Items {
@@ -1098,20 +1107,20 @@ func getPods(ctx context.Context, clientset *kubernetes.Clientset, namespace str
 
 //func describePod(ctx context.Context, clientset *kubernetes.Clientset, namespace string) (*data.Frame, error) {
 //
-//	list, err := clientset.AppsV1().Deployments(namespace).List(ctx, metav1.ListOptions{})
+//	list, err := clientset.AppsV1().Deployments(namespace).List(ctx, listOpts)
 //	if err != nil {
 //		return nil, err
 //	}
 //
-//	frame := data.NewFrame("response",
-//		data.NewField("name", nil, []string{}),
-//		data.NewField("namespace", nil, []string{}),
-//		data.NewField("status", nil, []string{}),
-//		data.NewField("images", nil, []json.RawMessage{}),
-//		data.NewField("labels", nil, []json.RawMessage{}),
-//		data.NewField("target", nil, []int32{}),
-//		data.NewField("available", nil, []int32{}),
-//		data.NewField("created", nil, []time.Time{}),
+//	frame := data.NewFrame("Workloads",
+//		data.NewField("Name", nil, []string{}),
+//		data.NewField("Namespace", nil, []string{}),
+//		data.NewField("Status", nil, []string{}),
+//		data.NewField("Images", nil, []json.RawMessage{}),
+//		data.NewField("Labels", nil, []json.RawMessage{}),
+//		data.NewField("Target", nil, []int32{}),
+//		data.NewField("Available", nil, []int32{}),
+//		data.NewField("Created", nil, []time.Time{}),
 //	)
 //
 //	for _, pod := range list.Items {
@@ -1133,20 +1142,20 @@ func getPods(ctx context.Context, clientset *kubernetes.Clientset, namespace str
 //	return frame, nil
 //}
 
-func getServices(ctx context.Context, clientset *kubernetes.Clientset, namespace string) (*data.Frame, error) {
-	list, err := clientset.CoreV1().Services(namespace).List(ctx, metav1.ListOptions{})
+func getServices(ctx context.Context, clientset *kubernetes.Clientset, namespace string, listOpts metav1.ListOptions) (*data.Frame, error) {
+	list, err := clientset.CoreV1().Services(namespace).List(ctx, listOpts)
 	if err != nil {
 		return nil, err
 	}
 
-	frame := data.NewFrame("response",
-		data.NewField("name", nil, []string{}),
-		data.NewField("namespace", nil, []string{}),
-		data.NewField("type", nil, []string{}),
-		data.NewField("clusterip", nil, []string{}),
-		data.NewField("ports", nil, []json.RawMessage{}),
-		data.NewField("labels", nil, []json.RawMessage{}),
-		data.NewField("created", nil, []time.Time{}),
+	frame := data.NewFrame("Workloads",
+		data.NewField("Name", nil, []string{}),
+		data.NewField("Namespace", nil, []string{}),
+		data.NewField("Type", nil, []string{}),
+		data.NewField("Cluster IP", nil, []string{}),
+		data.NewField("Ports", nil, []json.RawMessage{}),
+		data.NewField("Labels", nil, []json.RawMessage{}),
+		data.NewField("Created", nil, []time.Time{}),
 	)
 
 	for _, svc := range list.Items {
@@ -1173,20 +1182,20 @@ func getServices(ctx context.Context, clientset *kubernetes.Clientset, namespace
 	return frame, nil
 }
 
-func getIngresses(ctx context.Context, clientset *kubernetes.Clientset, namespace string) (*data.Frame, error) {
-	list, err := clientset.NetworkingV1().Ingresses(namespace).List(ctx, metav1.ListOptions{})
+func getIngresses(ctx context.Context, clientset *kubernetes.Clientset, namespace string, listOpts metav1.ListOptions) (*data.Frame, error) {
+	list, err := clientset.NetworkingV1().Ingresses(namespace).List(ctx, listOpts)
 	if err != nil {
 		return nil, err
 	}
 
-	frame := data.NewFrame("response",
-		data.NewField("name", nil, []string{}),
-		data.NewField("namespace", nil, []string{}),
-		data.NewField("class", nil, []string{}),
-		data.NewField("hosts", nil, []json.RawMessage{}),
-		data.NewField("tls", nil, []bool{}),
-		data.NewField("labels", nil, []json.RawMessage{}),
-		data.NewField("created", nil, []time.Time{}),
+	frame := data.NewFrame("Workloads",
+		data.NewField("Name", nil, []string{}),
+		data.NewField("Namespace", nil, []string{}),
+		data.NewField("Class", nil, []string{}),
+		data.NewField("Hosts", nil, []json.RawMessage{}),
+		data.NewField("TLS", nil, []bool{}),
+		data.NewField("Labels", nil, []json.RawMessage{}),
+		data.NewField("Created", nil, []time.Time{}),
 	)
 
 	for _, ing := range list.Items {
@@ -1212,17 +1221,17 @@ func getIngresses(ctx context.Context, clientset *kubernetes.Clientset, namespac
 	return frame, nil
 }
 
-func getIngressClasses(ctx context.Context, clientset *kubernetes.Clientset) (*data.Frame, error) {
-	list, err := clientset.NetworkingV1().IngressClasses().List(ctx, metav1.ListOptions{})
+func getIngressClasses(ctx context.Context, clientset *kubernetes.Clientset, listOpts metav1.ListOptions) (*data.Frame, error) {
+	list, err := clientset.NetworkingV1().IngressClasses().List(ctx, listOpts)
 	if err != nil {
 		return nil, err
 	}
 
-	frame := data.NewFrame("response",
-		data.NewField("name", nil, []string{}),
-		data.NewField("controller", nil, []string{}),
-		data.NewField("labels", nil, []json.RawMessage{}),
-		data.NewField("created", nil, []time.Time{}),
+	frame := data.NewFrame("Workloads",
+		data.NewField("Name", nil, []string{}),
+		data.NewField("Controller", nil, []string{}),
+		data.NewField("Labels", nil, []json.RawMessage{}),
+		data.NewField("Created", nil, []time.Time{}),
 	)
 
 	for _, ic := range list.Items {
@@ -1236,18 +1245,18 @@ func getIngressClasses(ctx context.Context, clientset *kubernetes.Clientset) (*d
 	return frame, nil
 }
 
-func getConfigMaps(ctx context.Context, clientset *kubernetes.Clientset, namespace string) (*data.Frame, error) {
-	list, err := clientset.CoreV1().ConfigMaps(namespace).List(ctx, metav1.ListOptions{})
+func getConfigMaps(ctx context.Context, clientset *kubernetes.Clientset, namespace string, listOpts metav1.ListOptions) (*data.Frame, error) {
+	list, err := clientset.CoreV1().ConfigMaps(namespace).List(ctx, listOpts)
 	if err != nil {
 		return nil, err
 	}
 
-	frame := data.NewFrame("response",
-		data.NewField("name", nil, []string{}),
-		data.NewField("namespace", nil, []string{}),
-		data.NewField("keys", nil, []json.RawMessage{}),
-		data.NewField("labels", nil, []json.RawMessage{}),
-		data.NewField("created", nil, []time.Time{}),
+	frame := data.NewFrame("Workloads",
+		data.NewField("Name", nil, []string{}),
+		data.NewField("Namespace", nil, []string{}),
+		data.NewField("Keys", nil, []json.RawMessage{}),
+		data.NewField("Labels", nil, []json.RawMessage{}),
+		data.NewField("Created", nil, []time.Time{}),
 	)
 
 	for _, cm := range list.Items {
@@ -1269,19 +1278,19 @@ func getConfigMaps(ctx context.Context, clientset *kubernetes.Clientset, namespa
 	return frame, nil
 }
 
-func getSecrets(ctx context.Context, clientset *kubernetes.Clientset, namespace string) (*data.Frame, error) {
-	list, err := clientset.CoreV1().Secrets(namespace).List(ctx, metav1.ListOptions{})
+func getSecrets(ctx context.Context, clientset *kubernetes.Clientset, namespace string, listOpts metav1.ListOptions) (*data.Frame, error) {
+	list, err := clientset.CoreV1().Secrets(namespace).List(ctx, listOpts)
 	if err != nil {
 		return nil, err
 	}
 
-	frame := data.NewFrame("response",
-		data.NewField("name", nil, []string{}),
-		data.NewField("namespace", nil, []string{}),
-		data.NewField("type", nil, []string{}),
-		data.NewField("keys", nil, []json.RawMessage{}),
-		data.NewField("labels", nil, []json.RawMessage{}),
-		data.NewField("created", nil, []time.Time{}),
+	frame := data.NewFrame("Workloads",
+		data.NewField("Name", nil, []string{}),
+		data.NewField("Namespace", nil, []string{}),
+		data.NewField("Type", nil, []string{}),
+		data.NewField("Keys", nil, []json.RawMessage{}),
+		data.NewField("Labels", nil, []json.RawMessage{}),
+		data.NewField("Created", nil, []time.Time{}),
 	)
 
 	for _, secret := range list.Items {
@@ -1303,21 +1312,21 @@ func getSecrets(ctx context.Context, clientset *kubernetes.Clientset, namespace 
 	return frame, nil
 }
 
-func getPersistentVolumeClaims(ctx context.Context, clientset *kubernetes.Clientset, namespace string) (*data.Frame, error) {
-	list, err := clientset.CoreV1().PersistentVolumeClaims(namespace).List(ctx, metav1.ListOptions{})
+func getPersistentVolumeClaims(ctx context.Context, clientset *kubernetes.Clientset, namespace string, listOpts metav1.ListOptions) (*data.Frame, error) {
+	list, err := clientset.CoreV1().PersistentVolumeClaims(namespace).List(ctx, listOpts)
 	if err != nil {
 		return nil, err
 	}
 
-	frame := data.NewFrame("response",
-		data.NewField("name", nil, []string{}),
-		data.NewField("namespace", nil, []string{}),
-		data.NewField("status", nil, []string{}),
-		data.NewField("storageclass", nil, []string{}),
-		data.NewField("capacity", nil, []string{}),
-		data.NewField("accessmodes", nil, []json.RawMessage{}),
-		data.NewField("labels", nil, []json.RawMessage{}),
-		data.NewField("created", nil, []time.Time{}),
+	frame := data.NewFrame("Workloads",
+		data.NewField("Name", nil, []string{}),
+		data.NewField("Namespace", nil, []string{}),
+		data.NewField("Status", nil, []string{}),
+		data.NewField("Storage Class", nil, []string{}),
+		data.NewField("Capacity", nil, []string{}),
+		data.NewField("Access Modes", nil, []json.RawMessage{}),
+		data.NewField("Labels", nil, []json.RawMessage{}),
+		data.NewField("Created", nil, []time.Time{}),
 	)
 
 	for _, pvc := range list.Items {
@@ -1347,19 +1356,19 @@ func getPersistentVolumeClaims(ctx context.Context, clientset *kubernetes.Client
 	return frame, nil
 }
 
-func getStorageClasses(ctx context.Context, clientset *kubernetes.Clientset) (*data.Frame, error) {
-	list, err := clientset.StorageV1().StorageClasses().List(ctx, metav1.ListOptions{})
+func getStorageClasses(ctx context.Context, clientset *kubernetes.Clientset, listOpts metav1.ListOptions) (*data.Frame, error) {
+	list, err := clientset.StorageV1().StorageClasses().List(ctx, listOpts)
 	if err != nil {
 		return nil, err
 	}
 
-	frame := data.NewFrame("response",
-		data.NewField("name", nil, []string{}),
-		data.NewField("provisioner", nil, []string{}),
-		data.NewField("reclaimpolicy", nil, []string{}),
-		data.NewField("volumebindingmode", nil, []string{}),
-		data.NewField("labels", nil, []json.RawMessage{}),
-		data.NewField("created", nil, []time.Time{}),
+	frame := data.NewFrame("Workloads",
+		data.NewField("Name", nil, []string{}),
+		data.NewField("Provisioner", nil, []string{}),
+		data.NewField("Reclaim Policy", nil, []string{}),
+		data.NewField("Volume Binding Mode", nil, []string{}),
+		data.NewField("Labels", nil, []json.RawMessage{}),
+		data.NewField("Created", nil, []time.Time{}),
 	)
 
 	for _, sc := range list.Items {
@@ -1381,9 +1390,10 @@ func getStorageClasses(ctx context.Context, clientset *kubernetes.Clientset) (*d
 	return frame, nil
 }
 
-func getCRDs(ctx context.Context, clientset *kubernetes.Clientset) (*data.Frame, error) {
+func getCRDs(ctx context.Context, clientset *kubernetes.Clientset, listOpts metav1.ListOptions) (*data.Frame, error) {
 	rawBytes, err := clientset.RESTClient().Get().
 		AbsPath("/apis/apiextensions.k8s.io/v1/customresourcedefinitions").
+		Param("labelSelector", listOpts.LabelSelector).
 		DoRaw(ctx)
 	if err != nil {
 		return nil, err
@@ -1409,13 +1419,13 @@ func getCRDs(ctx context.Context, clientset *kubernetes.Clientset) (*data.Frame,
 		return nil, err
 	}
 
-	frame := data.NewFrame("response",
-		data.NewField("name", nil, []string{}),
-		data.NewField("group", nil, []string{}),
-		data.NewField("kind", nil, []string{}),
-		data.NewField("scope", nil, []string{}),
-		data.NewField("labels", nil, []json.RawMessage{}),
-		data.NewField("created", nil, []time.Time{}),
+	frame := data.NewFrame("Workloads",
+		data.NewField("Name", nil, []string{}),
+		data.NewField("Group", nil, []string{}),
+		data.NewField("Kind", nil, []string{}),
+		data.NewField("Scope", nil, []string{}),
+		data.NewField("Labels", nil, []json.RawMessage{}),
+		data.NewField("Created", nil, []time.Time{}),
 	)
 
 	for _, crd := range result.Items {
@@ -1429,18 +1439,18 @@ func getCRDs(ctx context.Context, clientset *kubernetes.Clientset) (*data.Frame,
 	return frame, nil
 }
 
-func getClusterRoleBindings(ctx context.Context, clientset *kubernetes.Clientset) (*data.Frame, error) {
-	list, err := clientset.RbacV1().ClusterRoleBindings().List(ctx, metav1.ListOptions{})
+func getClusterRoleBindings(ctx context.Context, clientset *kubernetes.Clientset, listOpts metav1.ListOptions) (*data.Frame, error) {
+	list, err := clientset.RbacV1().ClusterRoleBindings().List(ctx, listOpts)
 	if err != nil {
 		return nil, err
 	}
 
-	frame := data.NewFrame("response",
-		data.NewField("name", nil, []string{}),
-		data.NewField("role", nil, []string{}),
-		data.NewField("subjects", nil, []json.RawMessage{}),
-		data.NewField("labels", nil, []json.RawMessage{}),
-		data.NewField("created", nil, []time.Time{}),
+	frame := data.NewFrame("Workloads",
+		data.NewField("Name", nil, []string{}),
+		data.NewField("Role", nil, []string{}),
+		data.NewField("Subjects", nil, []json.RawMessage{}),
+		data.NewField("Labels", nil, []json.RawMessage{}),
+		data.NewField("Created", nil, []time.Time{}),
 	)
 
 	for _, crb := range list.Items {
@@ -1468,17 +1478,17 @@ func getClusterRoleBindings(ctx context.Context, clientset *kubernetes.Clientset
 	return frame, nil
 }
 
-func getClusterRoles(ctx context.Context, clientset *kubernetes.Clientset) (*data.Frame, error) {
-	list, err := clientset.RbacV1().ClusterRoles().List(ctx, metav1.ListOptions{})
+func getClusterRoles(ctx context.Context, clientset *kubernetes.Clientset, listOpts metav1.ListOptions) (*data.Frame, error) {
+	list, err := clientset.RbacV1().ClusterRoles().List(ctx, listOpts)
 	if err != nil {
 		return nil, err
 	}
 
-	frame := data.NewFrame("response",
-		data.NewField("name", nil, []string{}),
-		data.NewField("rules", nil, []int32{}),
-		data.NewField("labels", nil, []json.RawMessage{}),
-		data.NewField("created", nil, []time.Time{}),
+	frame := data.NewFrame("Workloads",
+		data.NewField("Name", nil, []string{}),
+		data.NewField("Rules", nil, []int32{}),
+		data.NewField("Labels", nil, []json.RawMessage{}),
+		data.NewField("Created", nil, []time.Time{}),
 	)
 
 	for _, cr := range list.Items {
@@ -1492,21 +1502,21 @@ func getClusterRoles(ctx context.Context, clientset *kubernetes.Clientset) (*dat
 	return frame, nil
 }
 
-func getEvents(ctx context.Context, clientset *kubernetes.Clientset, namespace string) (*data.Frame, error) {
-	list, err := clientset.CoreV1().Events(namespace).List(ctx, metav1.ListOptions{})
+func getEvents(ctx context.Context, clientset *kubernetes.Clientset, namespace string, listOpts metav1.ListOptions) (*data.Frame, error) {
+	list, err := clientset.CoreV1().Events(namespace).List(ctx, listOpts)
 	if err != nil {
 		return nil, err
 	}
 
-	frame := data.NewFrame("response",
-		data.NewField("name", nil, []string{}),
-		data.NewField("namespace", nil, []string{}),
-		data.NewField("type", nil, []string{}),
-		data.NewField("reason", nil, []string{}),
-		data.NewField("object", nil, []string{}),
-		data.NewField("message", nil, []string{}),
-		data.NewField("count", nil, []int32{}),
-		data.NewField("created", nil, []time.Time{}),
+	frame := data.NewFrame("Workloads",
+		data.NewField("Name", nil, []string{}),
+		data.NewField("Namespace", nil, []string{}),
+		data.NewField("Type", nil, []string{}),
+		data.NewField("Reason", nil, []string{}),
+		data.NewField("Object", nil, []string{}),
+		data.NewField("Message", nil, []string{}),
+		data.NewField("Count", nil, []int32{}),
+		data.NewField("Created", nil, []time.Time{}),
 	)
 
 	for _, ev := range list.Items {
@@ -1517,19 +1527,19 @@ func getEvents(ctx context.Context, clientset *kubernetes.Clientset, namespace s
 	return frame, nil
 }
 
-func getNetworkPolicies(ctx context.Context, clientset *kubernetes.Clientset, namespace string) (*data.Frame, error) {
-	list, err := clientset.NetworkingV1().NetworkPolicies(namespace).List(ctx, metav1.ListOptions{})
+func getNetworkPolicies(ctx context.Context, clientset *kubernetes.Clientset, namespace string, listOpts metav1.ListOptions) (*data.Frame, error) {
+	list, err := clientset.NetworkingV1().NetworkPolicies(namespace).List(ctx, listOpts)
 	if err != nil {
 		return nil, err
 	}
 
-	frame := data.NewFrame("response",
-		data.NewField("name", nil, []string{}),
-		data.NewField("namespace", nil, []string{}),
-		data.NewField("podselector", nil, []string{}),
-		data.NewField("policytypes", nil, []json.RawMessage{}),
-		data.NewField("labels", nil, []json.RawMessage{}),
-		data.NewField("created", nil, []time.Time{}),
+	frame := data.NewFrame("Workloads",
+		data.NewField("Name", nil, []string{}),
+		data.NewField("Namespace", nil, []string{}),
+		data.NewField("Pod Selector", nil, []string{}),
+		data.NewField("Policy Types", nil, []json.RawMessage{}),
+		data.NewField("Labels", nil, []json.RawMessage{}),
+		data.NewField("Created", nil, []time.Time{}),
 	)
 
 	for _, np := range list.Items {
@@ -1552,20 +1562,20 @@ func getNetworkPolicies(ctx context.Context, clientset *kubernetes.Clientset, na
 	return frame, nil
 }
 
-func getNodes(ctx context.Context, clientset *kubernetes.Clientset) (*data.Frame, error) {
-	list, err := clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+func getNodes(ctx context.Context, clientset *kubernetes.Clientset, listOpts metav1.ListOptions) (*data.Frame, error) {
+	list, err := clientset.CoreV1().Nodes().List(ctx, listOpts)
 	if err != nil {
 		return nil, err
 	}
 
-	frame := data.NewFrame("response",
-		data.NewField("name", nil, []string{}),
-		data.NewField("status", nil, []string{}),
-		data.NewField("roles", nil, []string{}),
-		data.NewField("version", nil, []string{}),
-		data.NewField("os", nil, []string{}),
-		data.NewField("labels", nil, []json.RawMessage{}),
-		data.NewField("created", nil, []time.Time{}),
+	frame := data.NewFrame("Workloads",
+		data.NewField("Name", nil, []string{}),
+		data.NewField("Status", nil, []string{}),
+		data.NewField("Roles", nil, []string{}),
+		data.NewField("Version", nil, []string{}),
+		data.NewField("OS", nil, []string{}),
+		data.NewField("Labels", nil, []json.RawMessage{}),
+		data.NewField("Created", nil, []time.Time{}),
 	)
 
 	for _, node := range list.Items {
@@ -1596,22 +1606,22 @@ func getNodes(ctx context.Context, clientset *kubernetes.Clientset) (*data.Frame
 	return frame, nil
 }
 
-func getPersistentVolumes(ctx context.Context, clientset *kubernetes.Clientset) (*data.Frame, error) {
-	list, err := clientset.CoreV1().PersistentVolumes().List(ctx, metav1.ListOptions{})
+func getPersistentVolumes(ctx context.Context, clientset *kubernetes.Clientset, listOpts metav1.ListOptions) (*data.Frame, error) {
+	list, err := clientset.CoreV1().PersistentVolumes().List(ctx, listOpts)
 	if err != nil {
 		return nil, err
 	}
 
-	frame := data.NewFrame("response",
-		data.NewField("name", nil, []string{}),
-		data.NewField("status", nil, []string{}),
-		data.NewField("storageclass", nil, []string{}),
-		data.NewField("capacity", nil, []string{}),
-		data.NewField("accessmodes", nil, []json.RawMessage{}),
-		data.NewField("reclaimpolicy", nil, []string{}),
-		data.NewField("claim", nil, []string{}),
-		data.NewField("labels", nil, []json.RawMessage{}),
-		data.NewField("created", nil, []time.Time{}),
+	frame := data.NewFrame("Workloads",
+		data.NewField("Name", nil, []string{}),
+		data.NewField("Status", nil, []string{}),
+		data.NewField("Storage Class", nil, []string{}),
+		data.NewField("Capacity", nil, []string{}),
+		data.NewField("Access Modes", nil, []json.RawMessage{}),
+		data.NewField("Reclaim Policy", nil, []string{}),
+		data.NewField("Claim", nil, []string{}),
+		data.NewField("Labels", nil, []json.RawMessage{}),
+		data.NewField("Created", nil, []time.Time{}),
 	)
 
 	for _, pv := range list.Items {
@@ -1641,19 +1651,19 @@ func getPersistentVolumes(ctx context.Context, clientset *kubernetes.Clientset) 
 	return frame, nil
 }
 
-func getRoleBindings(ctx context.Context, clientset *kubernetes.Clientset, namespace string) (*data.Frame, error) {
-	list, err := clientset.RbacV1().RoleBindings(namespace).List(ctx, metav1.ListOptions{})
+func getRoleBindings(ctx context.Context, clientset *kubernetes.Clientset, namespace string, listOpts metav1.ListOptions) (*data.Frame, error) {
+	list, err := clientset.RbacV1().RoleBindings(namespace).List(ctx, listOpts)
 	if err != nil {
 		return nil, err
 	}
 
-	frame := data.NewFrame("response",
-		data.NewField("name", nil, []string{}),
-		data.NewField("namespace", nil, []string{}),
-		data.NewField("role", nil, []string{}),
-		data.NewField("subjects", nil, []json.RawMessage{}),
-		data.NewField("labels", nil, []json.RawMessage{}),
-		data.NewField("created", nil, []time.Time{}),
+	frame := data.NewFrame("Workloads",
+		data.NewField("Name", nil, []string{}),
+		data.NewField("Namespace", nil, []string{}),
+		data.NewField("Role", nil, []string{}),
+		data.NewField("Subjects", nil, []json.RawMessage{}),
+		data.NewField("Labels", nil, []json.RawMessage{}),
+		data.NewField("Created", nil, []time.Time{}),
 	)
 
 	for _, rb := range list.Items {
@@ -1681,18 +1691,18 @@ func getRoleBindings(ctx context.Context, clientset *kubernetes.Clientset, names
 	return frame, nil
 }
 
-func getRoles(ctx context.Context, clientset *kubernetes.Clientset, namespace string) (*data.Frame, error) {
-	list, err := clientset.RbacV1().Roles(namespace).List(ctx, metav1.ListOptions{})
+func getRoles(ctx context.Context, clientset *kubernetes.Clientset, namespace string, listOpts metav1.ListOptions) (*data.Frame, error) {
+	list, err := clientset.RbacV1().Roles(namespace).List(ctx, listOpts)
 	if err != nil {
 		return nil, err
 	}
 
-	frame := data.NewFrame("response",
-		data.NewField("name", nil, []string{}),
-		data.NewField("namespace", nil, []string{}),
-		data.NewField("rules", nil, []int32{}),
-		data.NewField("labels", nil, []json.RawMessage{}),
-		data.NewField("created", nil, []time.Time{}),
+	frame := data.NewFrame("Workloads",
+		data.NewField("Name", nil, []string{}),
+		data.NewField("Namespace", nil, []string{}),
+		data.NewField("Rules", nil, []int32{}),
+		data.NewField("Labels", nil, []json.RawMessage{}),
+		data.NewField("Created", nil, []time.Time{}),
 	)
 
 	for _, role := range list.Items {
@@ -1706,18 +1716,18 @@ func getRoles(ctx context.Context, clientset *kubernetes.Clientset, namespace st
 	return frame, nil
 }
 
-func getServiceAccounts(ctx context.Context, clientset *kubernetes.Clientset, namespace string) (*data.Frame, error) {
-	list, err := clientset.CoreV1().ServiceAccounts(namespace).List(ctx, metav1.ListOptions{})
+func getServiceAccounts(ctx context.Context, clientset *kubernetes.Clientset, namespace string, listOpts metav1.ListOptions) (*data.Frame, error) {
+	list, err := clientset.CoreV1().ServiceAccounts(namespace).List(ctx, listOpts)
 	if err != nil {
 		return nil, err
 	}
 
-	frame := data.NewFrame("response",
-		data.NewField("name", nil, []string{}),
-		data.NewField("namespace", nil, []string{}),
-		data.NewField("secrets", nil, []int32{}),
-		data.NewField("labels", nil, []json.RawMessage{}),
-		data.NewField("created", nil, []time.Time{}),
+	frame := data.NewFrame("Workloads",
+		data.NewField("Name", nil, []string{}),
+		data.NewField("Namespace", nil, []string{}),
+		data.NewField("Secrets", nil, []int32{}),
+		data.NewField("Labels", nil, []json.RawMessage{}),
+		data.NewField("Created", nil, []time.Time{}),
 	)
 
 	for _, sa := range list.Items {
