@@ -1,7 +1,6 @@
 import React from 'react';
-import { InlineField, Combobox, Stack } from '@grafana/ui';
+import { InlineField, Combobox, Stack, ComboboxOption } from '@grafana/ui';
 import { QueryEditorProps } from '@grafana/data';
-import { ComboboxOption } from '@grafana/ui';
 import { DataSource } from '../datasource';
 import { KubernetesDatasourceOptions, KubernetesQuery } from '../types';
 
