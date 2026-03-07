@@ -95,8 +95,7 @@ export class DataSource extends DataSourceWithBackend<KubernetesQuery, Kubernete
       for (const v of field?.values ?? []) {
         if (v == null) { continue; }
         try {
-          const obj = typeof v === 'string' ? JSON.parse(v) : v;
-          for (const [key, val] of Object.entries(obj)) {
+          for (const [key, val] of Object.entries(v)) {
             labelSet.add(`${key}=${val}`);
           }
         } catch {}
