@@ -2,12 +2,14 @@ package plugin
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
 	"github.com/grafana/grafana-plugin-sdk-go/backend/instancemgmt"
 	"github.com/grafana/grafana-plugin-sdk-go/data"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -390,27 +392,60 @@ func (d *Datasource) runGetQuery(ctx context.Context, pCtx backend.PluginContext
 		return nil, err
 	}
 
-	wrapSingle := func(frame *data.Frame, err error) (data.Frames, error) {
-		if err != nil {
-			return nil, err
-		}
-		setDetailMeta(frame)
-		return data.Frames{frame}, nil
+	namespace := qm.Namespace
+	if namespace == "_all" {
+		namespace = ""
 	}
 
 	switch qm.Resource {
 	case "pod", "pods":
-		return getPodDetail(ctx, clientset, qm.Namespace, qm.Name)
+		return getPodDetail(ctx, clientset, namespace, qm.Name)
 	case "deployments", "deployment":
-		return wrapSingle(getDeploymentDetail(ctx, clientset, qm.Namespace, qm.Name))
+		return getDeploymentDetail(ctx, clientset, namespace, qm.Name)
 	case "daemonsets", "daemonset":
-		return wrapSingle(getDaemonSetDetail(ctx, clientset, qm.Namespace, qm.Name))
+		return getDaemonSetDetail(ctx, clientset, namespace, qm.Name)
 	case "statefulsets", "statefulset":
-		return wrapSingle(getStatefulSetDetail(ctx, clientset, qm.Namespace, qm.Name))
+		return getStatefulSetDetail(ctx, clientset, namespace, qm.Name)
+	case "replicasets", "replicaset":
+		return getReplicaSetDetail(ctx, clientset, namespace, qm.Name)
+	case "jobs", "job":
+		return getJobDetail(ctx, clientset, namespace, qm.Name)
+	case "cronjobs", "cronjob":
+		return getCronJobDetail(ctx, clientset, namespace, qm.Name)
 	case "services", "service", "svc":
-		return wrapSingle(getServiceDetail(ctx, clientset, qm.Namespace, qm.Name))
+		return getServiceDetail(ctx, clientset, namespace, qm.Name)
+	case "ingresses", "ingress":
+		return getIngressDetail(ctx, clientset, namespace, qm.Name)
+	case "ingressclasses", "ingressclass":
+		return getIngressClassDetail(ctx, clientset, qm.Name)
+	case "configmaps", "configmap":
+		return getConfigMapDetail(ctx, clientset, namespace, qm.Name)
+	case "secrets", "secret":
+		return getSecretDetail(ctx, clientset, namespace, qm.Name)
+	case "persistentvolumeclaims", "pvc":
+		return getPVCDetail(ctx, clientset, namespace, qm.Name)
+	case "storageclasses", "storageclass":
+		return getStorageClassDetail(ctx, clientset, qm.Name)
 	case "nodes", "node":
-		return wrapSingle(getNodeDetail(ctx, clientset, qm.Name))
+		return getNodeDetailRich(ctx, clientset, qm.Name)
+	case "clusterrolebindings", "clusterrolebinding":
+		return getClusterRoleBindingDetail(ctx, clientset, qm.Name)
+	case "clusterroles", "clusterrole":
+		return getClusterRoleDetail(ctx, clientset, qm.Name)
+	case "namespaces", "namespace":
+		return getNamespaceDetail(ctx, clientset, qm.Name)
+	case "networkpolicies", "networkpolicy":
+		return getNetworkPolicyDetail(ctx, clientset, namespace, qm.Name)
+	case "persistentvolumes", "persistentvolume", "pv":
+		return getPersistentVolumeDetail(ctx, clientset, qm.Name)
+	case "rolebindings", "rolebinding":
+		return getRoleBindingDetail(ctx, clientset, namespace, qm.Name)
+	case "roles", "role":
+		return getRoleDetail(ctx, clientset, namespace, qm.Name)
+	case "serviceaccounts", "serviceaccount", "sa":
+		return getServiceAccountDetail(ctx, clientset, namespace, qm.Name)
+	case "crds", "crd", "customresourcedefinitions":
+		return getCRDDetail(ctx, clientset, qm.Name)
 	default:
 		return nil, fmt.Errorf("get not supported for resource: %s", qm.Resource)
 	}
@@ -680,105 +715,1125 @@ func getPodDetail(ctx context.Context, clientset *kubernetes.Clientset, namespac
 	return data.Frames{metaFrame, condFrame, evtFrame, containersFrame}, nil
 }
 
-func getDeploymentDetail(ctx context.Context, clientset *kubernetes.Clientset, namespace, name string) (*data.Frame, error) {
+func getDeploymentDetail(ctx context.Context, clientset *kubernetes.Clientset, namespace, name string) (data.Frames, error) {
 	dep, err := clientset.AppsV1().Deployments(namespace).Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
 		return nil, err
 	}
 
-	frame := newDetailFrame()
-	frame.AppendRow("Name", dep.Name)
-	frame.AppendRow("Namespace", dep.Namespace)
-	frame.AppendRow("Replicas", fmt.Sprintf("%d", dep.Status.Replicas))
-	frame.AppendRow("Ready", fmt.Sprintf("%d", dep.Status.ReadyReplicas))
-	frame.AppendRow("Available", fmt.Sprintf("%d", dep.Status.AvailableReplicas))
-	frame.AppendRow("Updated", fmt.Sprintf("%d", dep.Status.UpdatedReplicas))
-	frame.AppendRow("Strategy", string(dep.Spec.Strategy.Type))
-	frame.AppendRow("Labels", labelsToString(dep.Labels))
-	frame.AppendRow("Selector", labelsToString(dep.Spec.Selector.MatchLabels))
-	frame.AppendRow("Created", dep.CreationTimestamp.String())
-
-	for _, c := range dep.Spec.Template.Spec.Containers {
-		frame.AppendRow("Container: "+c.Name, c.Image)
+	ownerKind, ownerName := "", ""
+	if len(dep.OwnerReferences) > 0 {
+		ownerKind = dep.OwnerReferences[0].Kind
+		ownerName = dep.OwnerReferences[0].Name
 	}
+	labelsJSON, _ := json.Marshal(dep.Labels)
+	annotationsJSON, _ := json.Marshal(dep.Annotations)
+
+	revHistLimit := int32(0)
+	if dep.Spec.RevisionHistoryLimit != nil {
+		revHistLimit = *dep.Spec.RevisionHistoryLimit
+	}
+	maxSurge, maxUnavailable := "", ""
+	if dep.Spec.Strategy.RollingUpdate != nil {
+		if dep.Spec.Strategy.RollingUpdate.MaxSurge != nil {
+			maxSurge = dep.Spec.Strategy.RollingUpdate.MaxSurge.String()
+		}
+		if dep.Spec.Strategy.RollingUpdate.MaxUnavailable != nil {
+			maxUnavailable = dep.Spec.Strategy.RollingUpdate.MaxUnavailable.String()
+		}
+	}
+
+	metaFrame := data.NewFrame("meta",
+		data.NewField("Name", nil, []string{}),
+		data.NewField("Namespace", nil, []string{}),
+		data.NewField("UID", nil, []string{}),
+		data.NewField("Created", nil, []time.Time{}),
+		data.NewField("Owner Kind", nil, []string{}),
+		data.NewField("Owner Name", nil, []string{}),
+		data.NewField("Labels", nil, []json.RawMessage{}),
+		data.NewField("Annotations", nil, []json.RawMessage{}),
+		data.NewField("Strategy", nil, []string{}),
+		data.NewField("Replicas", nil, []int32{}),
+		data.NewField("Ready", nil, []int32{}),
+		data.NewField("Available", nil, []int32{}),
+		data.NewField("Updated", nil, []int32{}),
+		data.NewField("Min Ready Seconds", nil, []int32{}),
+		data.NewField("Revision History Limit", nil, []int32{}),
+		data.NewField("Selector", nil, []string{}),
+		data.NewField("Max Surge", nil, []string{}),
+		data.NewField("Max Unavailable", nil, []string{}),
+	)
+	setDetailMeta(metaFrame)
+	metaFrame.AppendRow(
+		dep.Name, dep.Namespace, string(dep.UID), dep.CreationTimestamp.Time,
+		ownerKind, ownerName,
+		json.RawMessage(labelsJSON), json.RawMessage(annotationsJSON),
+		string(dep.Spec.Strategy.Type),
+		dep.Status.Replicas, dep.Status.ReadyReplicas, dep.Status.AvailableReplicas, dep.Status.UpdatedReplicas,
+		dep.Spec.MinReadySeconds, revHistLimit,
+		labelsToString(dep.Spec.Selector.MatchLabels), maxSurge, maxUnavailable,
+	)
+
+	condFrame := data.NewFrame("conditions",
+		data.NewField("Type", nil, []string{}),
+		data.NewField("Status", nil, []string{}),
+		data.NewField("Last Probe Time", nil, []*time.Time{}),
+		data.NewField("Last Transition Time", nil, []*time.Time{}),
+		data.NewField("Reason", nil, []string{}),
+		data.NewField("Message", nil, []string{}),
+	)
+	setDetailMeta(condFrame)
 	for _, cond := range dep.Status.Conditions {
-		frame.AppendRow("Condition: "+string(cond.Type), string(cond.Status)+" - "+cond.Message)
+		var lut *time.Time
+		if !cond.LastUpdateTime.IsZero() {
+			t := cond.LastUpdateTime.Time
+			lut = &t
+		}
+		var ltt *time.Time
+		if !cond.LastTransitionTime.IsZero() {
+			t := cond.LastTransitionTime.Time
+			ltt = &t
+		}
+		condFrame.AppendRow(string(cond.Type), string(cond.Status), lut, ltt, cond.Reason, cond.Message)
 	}
 
-	return frame, nil
+	evtFrame := data.NewFrame("events",
+		data.NewField("Name", nil, []string{}),
+		data.NewField("Reason", nil, []string{}),
+		data.NewField("Message", nil, []string{}),
+		data.NewField("Source", nil, []string{}),
+		data.NewField("Sub Object", nil, []string{}),
+		data.NewField("Count", nil, []int32{}),
+		data.NewField("First Seen", nil, []time.Time{}),
+		data.NewField("Last Seen", nil, []time.Time{}),
+	)
+	setDetailMeta(evtFrame)
+	events, _ := clientset.CoreV1().Events(namespace).List(ctx, metav1.ListOptions{
+		FieldSelector: "involvedObject.name=" + name,
+	})
+	if events != nil {
+		for _, evt := range events.Items {
+			source := evt.Source.Component
+			if evt.Source.Host != "" {
+				source += " " + evt.Source.Host
+			}
+			evtFrame.AppendRow(
+				evt.Name, evt.Reason, evt.Message,
+				source, evt.InvolvedObject.FieldPath,
+				evt.Count, evt.FirstTimestamp.Time, evt.LastTimestamp.Time,
+			)
+		}
+	}
+
+	containersFrame := data.NewFrame("containers",
+		data.NewField("Name", nil, []string{}),
+		data.NewField("Image", nil, []string{}),
+		data.NewField("Env", nil, []json.RawMessage{}),
+		data.NewField("Command", nil, []json.RawMessage{}),
+		data.NewField("Args", nil, []json.RawMessage{}),
+		data.NewField("Limits", nil, []json.RawMessage{}),
+		data.NewField("Requests", nil, []json.RawMessage{}),
+	)
+	setDetailMeta(containersFrame)
+	for _, c := range dep.Spec.Template.Spec.Containers {
+		type envEntry struct {
+			Name  string `json:"name"`
+			Value string `json:"value"`
+		}
+		envEntries := make([]envEntry, 0, len(c.Env))
+		for _, e := range c.Env {
+			val := e.Value
+			if e.ValueFrom != nil {
+				switch {
+				case e.ValueFrom.ConfigMapKeyRef != nil:
+					val = "configmap:" + e.ValueFrom.ConfigMapKeyRef.Name + "/" + e.ValueFrom.ConfigMapKeyRef.Key
+				case e.ValueFrom.SecretKeyRef != nil:
+					val = "secret:" + e.ValueFrom.SecretKeyRef.Name + "/" + e.ValueFrom.SecretKeyRef.Key
+				case e.ValueFrom.FieldRef != nil:
+					val = "fieldRef:" + e.ValueFrom.FieldRef.FieldPath
+				case e.ValueFrom.ResourceFieldRef != nil:
+					val = "resourceFieldRef:" + e.ValueFrom.ResourceFieldRef.Resource
+				}
+			}
+			envEntries = append(envEntries, envEntry{Name: e.Name, Value: val})
+		}
+		envJSON, _ := json.Marshal(envEntries)
+		limits := make(map[string]string)
+		for k, v := range c.Resources.Limits {
+			limits[string(k)] = v.String()
+		}
+		requests := make(map[string]string)
+		for k, v := range c.Resources.Requests {
+			requests[string(k)] = v.String()
+		}
+		limitsJSON, _ := json.Marshal(limits)
+		requestsJSON, _ := json.Marshal(requests)
+		cmdJSON, _ := json.Marshal(c.Command)
+		argsJSON, _ := json.Marshal(c.Args)
+		containersFrame.AppendRow(
+			c.Name, c.Image,
+			json.RawMessage(envJSON), json.RawMessage(cmdJSON), json.RawMessage(argsJSON),
+			json.RawMessage(limitsJSON), json.RawMessage(requestsJSON),
+		)
+	}
+
+	// ReplicaSets owned by this deployment
+	var selectorParts []string
+	for k, v := range dep.Spec.Selector.MatchLabels {
+		selectorParts = append(selectorParts, k+"="+v)
+	}
+	currentRevision := dep.Annotations["deployment.kubernetes.io/revision"]
+	rsList, _ := clientset.AppsV1().ReplicaSets(namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: strings.Join(selectorParts, ","),
+	})
+	rsFrame := data.NewFrame("replicasets",
+		data.NewField("Name", nil, []string{}),
+		data.NewField("Namespace", nil, []string{}),
+		data.NewField("Created", nil, []time.Time{}),
+		data.NewField("Is New", nil, []bool{}),
+		data.NewField("Replicas", nil, []int32{}),
+		data.NewField("Ready", nil, []int32{}),
+		data.NewField("Available", nil, []int32{}),
+		data.NewField("Labels", nil, []json.RawMessage{}),
+		data.NewField("Images", nil, []json.RawMessage{}),
+	)
+	setDetailMeta(rsFrame)
+	if rsList != nil {
+		for _, rs := range rsList.Items {
+			isNew := currentRevision != "" && rs.Annotations["deployment.kubernetes.io/revision"] == currentRevision
+			rsLabelsJSON, _ := json.Marshal(rs.Labels)
+			images := make([]string, 0, len(rs.Spec.Template.Spec.Containers))
+			for _, c := range rs.Spec.Template.Spec.Containers {
+				images = append(images, c.Image)
+			}
+			imagesJSON, _ := json.Marshal(images)
+			rsFrame.AppendRow(
+				rs.Name, rs.Namespace, rs.CreationTimestamp.Time,
+				isNew,
+				rs.Status.Replicas, rs.Status.ReadyReplicas, rs.Status.AvailableReplicas,
+				json.RawMessage(rsLabelsJSON), json.RawMessage(imagesJSON),
+			)
+		}
+	}
+
+	// HPAs targeting this deployment
+	hpaList, _ := clientset.AutoscalingV2().HorizontalPodAutoscalers(namespace).List(ctx, metav1.ListOptions{})
+	hpaFrame := data.NewFrame("hpas",
+		data.NewField("Name", nil, []string{}),
+		data.NewField("Namespace", nil, []string{}),
+		data.NewField("Min Pods", nil, []int32{}),
+		data.NewField("Max Pods", nil, []int32{}),
+		data.NewField("Current Replicas", nil, []int32{}),
+		data.NewField("Desired Replicas", nil, []int32{}),
+		data.NewField("Created", nil, []time.Time{}),
+	)
+	setDetailMeta(hpaFrame)
+	if hpaList != nil {
+		for _, hpa := range hpaList.Items {
+			if hpa.Spec.ScaleTargetRef.Kind == "Deployment" && hpa.Spec.ScaleTargetRef.Name == name {
+				minReplicas := int32(1)
+				if hpa.Spec.MinReplicas != nil {
+					minReplicas = *hpa.Spec.MinReplicas
+				}
+				hpaFrame.AppendRow(
+					hpa.Name, hpa.Namespace,
+					minReplicas, hpa.Spec.MaxReplicas,
+					hpa.Status.CurrentReplicas, hpa.Status.DesiredReplicas,
+					hpa.CreationTimestamp.Time,
+				)
+			}
+		}
+	}
+
+	return data.Frames{metaFrame, condFrame, evtFrame, containersFrame, rsFrame, hpaFrame}, nil
 }
 
-func getDaemonSetDetail(ctx context.Context, clientset *kubernetes.Clientset, namespace, name string) (*data.Frame, error) {
+func getDaemonSetDetail(ctx context.Context, clientset *kubernetes.Clientset, namespace, name string) (data.Frames, error) {
 	ds, err := clientset.AppsV1().DaemonSets(namespace).Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
 		return nil, err
 	}
 
-	frame := newDetailFrame()
-	frame.AppendRow("Name", ds.Name)
-	frame.AppendRow("Namespace", ds.Namespace)
-	frame.AppendRow("Desired", fmt.Sprintf("%d", ds.Status.DesiredNumberScheduled))
-	frame.AppendRow("Current", fmt.Sprintf("%d", ds.Status.CurrentNumberScheduled))
-	frame.AppendRow("Ready", fmt.Sprintf("%d", ds.Status.NumberReady))
-	frame.AppendRow("Available", fmt.Sprintf("%d", ds.Status.NumberAvailable))
-	frame.AppendRow("Labels", labelsToString(ds.Labels))
-	frame.AppendRow("Selector", labelsToString(ds.Spec.Selector.MatchLabels))
-	frame.AppendRow("Created", ds.CreationTimestamp.String())
-
+	ownerKind, ownerName := "", ""
+	if len(ds.OwnerReferences) > 0 {
+		ownerKind = ds.OwnerReferences[0].Kind
+		ownerName = ds.OwnerReferences[0].Name
+	}
+	labelsJSON, _ := json.Marshal(ds.Labels)
+	annotationsJSON, _ := json.Marshal(ds.Annotations)
+	selectorJSON, _ := json.Marshal(ds.Spec.Selector.MatchLabels)
+	images := make([]string, 0, len(ds.Spec.Template.Spec.Containers))
 	for _, c := range ds.Spec.Template.Spec.Containers {
-		frame.AppendRow("Container: "+c.Name, c.Image)
+		images = append(images, c.Image)
+	}
+	imagesJSON, _ := json.Marshal(images)
+
+	metaFrame := data.NewFrame("meta",
+		data.NewField("Name", nil, []string{}),
+		data.NewField("Namespace", nil, []string{}),
+		data.NewField("UID", nil, []string{}),
+		data.NewField("Created", nil, []time.Time{}),
+		data.NewField("Owner Kind", nil, []string{}),
+		data.NewField("Owner Name", nil, []string{}),
+		data.NewField("Labels", nil, []json.RawMessage{}),
+		data.NewField("Annotations", nil, []json.RawMessage{}),
+		data.NewField("Kind", nil, []string{}),
+		data.NewField("Selector", nil, []json.RawMessage{}),
+		data.NewField("Images", nil, []json.RawMessage{}),
+		data.NewField("Number Running", nil, []int32{}),
+		data.NewField("Number Desired", nil, []int32{}),
+	)
+	setDetailMeta(metaFrame)
+	metaFrame.AppendRow(
+		ds.Name, ds.Namespace, string(ds.UID), ds.CreationTimestamp.Time,
+		ownerKind, ownerName,
+		json.RawMessage(labelsJSON), json.RawMessage(annotationsJSON),
+		"DaemonSet",
+		json.RawMessage(selectorJSON), json.RawMessage(imagesJSON),
+		ds.Status.NumberReady, ds.Status.DesiredNumberScheduled,
+	)
+
+	condFrame := data.NewFrame("conditions",
+		data.NewField("Type", nil, []string{}),
+		data.NewField("Status", nil, []string{}),
+		data.NewField("Last Probe Time", nil, []*time.Time{}),
+		data.NewField("Last Transition Time", nil, []*time.Time{}),
+		data.NewField("Reason", nil, []string{}),
+		data.NewField("Message", nil, []string{}),
+	)
+	setDetailMeta(condFrame)
+	for _, cond := range ds.Status.Conditions {
+		var ltt *time.Time
+		if !cond.LastTransitionTime.IsZero() {
+			t := cond.LastTransitionTime.Time
+			ltt = &t
+		}
+		condFrame.AppendRow(string(cond.Type), string(cond.Status), (*time.Time)(nil), ltt, cond.Reason, cond.Message)
 	}
 
-	return frame, nil
+	evtFrame := buildEventsFrame(ctx, clientset, namespace, name)
+	containersFrame := buildSpecContainersFrame(ds.Spec.Template.Spec.Containers)
+	podsFrame, _ := buildPodsSubFrame(ctx, clientset, namespace, ds.Spec.Selector.MatchLabels)
+	svcsFrame, _ := buildServicesSubFrame(ctx, clientset, namespace, ds.Spec.Template.Labels)
+
+	return data.Frames{metaFrame, condFrame, evtFrame, containersFrame, podsFrame, svcsFrame}, nil
 }
 
-func getStatefulSetDetail(ctx context.Context, clientset *kubernetes.Clientset, namespace, name string) (*data.Frame, error) {
+func getStatefulSetDetail(ctx context.Context, clientset *kubernetes.Clientset, namespace, name string) (data.Frames, error) {
 	ss, err := clientset.AppsV1().StatefulSets(namespace).Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
 		return nil, err
 	}
 
-	frame := newDetailFrame()
-	frame.AppendRow("Name", ss.Name)
-	frame.AppendRow("Namespace", ss.Namespace)
-	frame.AppendRow("Replicas", fmt.Sprintf("%d", ss.Status.Replicas))
-	frame.AppendRow("Ready", fmt.Sprintf("%d", ss.Status.ReadyReplicas))
-	frame.AppendRow("Current", fmt.Sprintf("%d", ss.Status.CurrentReplicas))
-	frame.AppendRow("Labels", labelsToString(ss.Labels))
-	frame.AppendRow("Selector", labelsToString(ss.Spec.Selector.MatchLabels))
-	frame.AppendRow("Created", ss.CreationTimestamp.String())
-
+	ownerKind, ownerName := "", ""
+	if len(ss.OwnerReferences) > 0 {
+		ownerKind = ss.OwnerReferences[0].Kind
+		ownerName = ss.OwnerReferences[0].Name
+	}
+	labelsJSON, _ := json.Marshal(ss.Labels)
+	annotationsJSON, _ := json.Marshal(ss.Annotations)
+	images := make([]string, 0, len(ss.Spec.Template.Spec.Containers))
 	for _, c := range ss.Spec.Template.Spec.Containers {
-		frame.AppendRow("Container: "+c.Name, c.Image)
+		images = append(images, c.Image)
+	}
+	imagesJSON, _ := json.Marshal(images)
+	desired := int32(1)
+	if ss.Spec.Replicas != nil {
+		desired = *ss.Spec.Replicas
 	}
 
-	return frame, nil
+	metaFrame := data.NewFrame("meta",
+		data.NewField("Name", nil, []string{}),
+		data.NewField("Namespace", nil, []string{}),
+		data.NewField("UID", nil, []string{}),
+		data.NewField("Created", nil, []time.Time{}),
+		data.NewField("Owner Kind", nil, []string{}),
+		data.NewField("Owner Name", nil, []string{}),
+		data.NewField("Labels", nil, []json.RawMessage{}),
+		data.NewField("Annotations", nil, []json.RawMessage{}),
+		data.NewField("Kind", nil, []string{}),
+		data.NewField("Images", nil, []json.RawMessage{}),
+		data.NewField("Number Running", nil, []int32{}),
+		data.NewField("Number Desired", nil, []int32{}),
+	)
+	setDetailMeta(metaFrame)
+	metaFrame.AppendRow(
+		ss.Name, ss.Namespace, string(ss.UID), ss.CreationTimestamp.Time,
+		ownerKind, ownerName,
+		json.RawMessage(labelsJSON), json.RawMessage(annotationsJSON),
+		"StatefulSet",
+		json.RawMessage(imagesJSON),
+		ss.Status.ReadyReplicas, desired,
+	)
+
+	condFrame := data.NewFrame("conditions",
+		data.NewField("Type", nil, []string{}),
+		data.NewField("Status", nil, []string{}),
+		data.NewField("Last Probe Time", nil, []*time.Time{}),
+		data.NewField("Last Transition Time", nil, []*time.Time{}),
+		data.NewField("Reason", nil, []string{}),
+		data.NewField("Message", nil, []string{}),
+	)
+	setDetailMeta(condFrame)
+	for _, cond := range ss.Status.Conditions {
+		var ltt *time.Time
+		if !cond.LastTransitionTime.IsZero() {
+			t := cond.LastTransitionTime.Time
+			ltt = &t
+		}
+		condFrame.AppendRow(string(cond.Type), string(cond.Status), (*time.Time)(nil), ltt, cond.Reason, cond.Message)
+	}
+
+	evtFrame := buildEventsFrame(ctx, clientset, namespace, name)
+	containersFrame := buildSpecContainersFrame(ss.Spec.Template.Spec.Containers)
+	podsFrame, _ := buildPodsSubFrame(ctx, clientset, namespace, ss.Spec.Selector.MatchLabels)
+
+	return data.Frames{metaFrame, condFrame, evtFrame, containersFrame, podsFrame}, nil
 }
 
-func getServiceDetail(ctx context.Context, clientset *kubernetes.Clientset, namespace, name string) (*data.Frame, error) {
+func getReplicaSetDetail(ctx context.Context, clientset *kubernetes.Clientset, namespace, name string) (data.Frames, error) {
+	rs, err := clientset.AppsV1().ReplicaSets(namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return nil, err
+	}
+
+	ownerKind, ownerName := "", ""
+	if len(rs.OwnerReferences) > 0 {
+		ownerKind = rs.OwnerReferences[0].Kind
+		ownerName = rs.OwnerReferences[0].Name
+	}
+	labelsJSON, _ := json.Marshal(rs.Labels)
+	annotationsJSON, _ := json.Marshal(rs.Annotations)
+	selectorJSON, _ := json.Marshal(rs.Spec.Selector.MatchLabels)
+	images := make([]string, 0, len(rs.Spec.Template.Spec.Containers))
+	for _, c := range rs.Spec.Template.Spec.Containers {
+		images = append(images, c.Image)
+	}
+	imagesJSON, _ := json.Marshal(images)
+	desired := int32(1)
+	if rs.Spec.Replicas != nil {
+		desired = *rs.Spec.Replicas
+	}
+
+	metaFrame := data.NewFrame("meta",
+		data.NewField("Name", nil, []string{}),
+		data.NewField("Namespace", nil, []string{}),
+		data.NewField("UID", nil, []string{}),
+		data.NewField("Created", nil, []time.Time{}),
+		data.NewField("Owner Kind", nil, []string{}),
+		data.NewField("Owner Name", nil, []string{}),
+		data.NewField("Labels", nil, []json.RawMessage{}),
+		data.NewField("Annotations", nil, []json.RawMessage{}),
+		data.NewField("Kind", nil, []string{}),
+		data.NewField("Selector", nil, []json.RawMessage{}),
+		data.NewField("Images", nil, []json.RawMessage{}),
+		data.NewField("Number Running", nil, []int32{}),
+		data.NewField("Number Desired", nil, []int32{}),
+	)
+	setDetailMeta(metaFrame)
+	metaFrame.AppendRow(
+		rs.Name, rs.Namespace, string(rs.UID), rs.CreationTimestamp.Time,
+		ownerKind, ownerName,
+		json.RawMessage(labelsJSON), json.RawMessage(annotationsJSON),
+		"ReplicaSet",
+		json.RawMessage(selectorJSON), json.RawMessage(imagesJSON),
+		rs.Status.ReadyReplicas, desired,
+	)
+
+	condFrame := data.NewFrame("conditions",
+		data.NewField("Type", nil, []string{}),
+		data.NewField("Status", nil, []string{}),
+		data.NewField("Last Probe Time", nil, []*time.Time{}),
+		data.NewField("Last Transition Time", nil, []*time.Time{}),
+		data.NewField("Reason", nil, []string{}),
+		data.NewField("Message", nil, []string{}),
+	)
+	setDetailMeta(condFrame)
+	for _, cond := range rs.Status.Conditions {
+		var ltt *time.Time
+		if !cond.LastTransitionTime.IsZero() {
+			t := cond.LastTransitionTime.Time
+			ltt = &t
+		}
+		condFrame.AppendRow(string(cond.Type), string(cond.Status), (*time.Time)(nil), ltt, cond.Reason, cond.Message)
+	}
+
+	evtFrame := buildEventsFrame(ctx, clientset, namespace, name)
+	containersFrame := buildSpecContainersFrame(rs.Spec.Template.Spec.Containers)
+	podsFrame, _ := buildPodsSubFrame(ctx, clientset, namespace, rs.Spec.Selector.MatchLabels)
+	svcsFrame, _ := buildServicesSubFrame(ctx, clientset, namespace, rs.Spec.Template.Labels)
+
+	return data.Frames{metaFrame, condFrame, evtFrame, containersFrame, podsFrame, svcsFrame}, nil
+}
+
+func getJobDetail(ctx context.Context, clientset *kubernetes.Clientset, namespace, name string) (data.Frames, error) {
+	job, err := clientset.BatchV1().Jobs(namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return nil, err
+	}
+
+	ownerKind, ownerName := "", ""
+	if len(job.OwnerReferences) > 0 {
+		ownerKind = job.OwnerReferences[0].Kind
+		ownerName = job.OwnerReferences[0].Name
+	}
+	labelsJSON, _ := json.Marshal(job.Labels)
+	annotationsJSON, _ := json.Marshal(job.Annotations)
+	images := make([]string, 0, len(job.Spec.Template.Spec.Containers))
+	for _, c := range job.Spec.Template.Spec.Containers {
+		images = append(images, c.Image)
+	}
+	imagesJSON, _ := json.Marshal(images)
+	completions := int32(1)
+	if job.Spec.Completions != nil {
+		completions = *job.Spec.Completions
+	}
+	parallelism := int32(1)
+	if job.Spec.Parallelism != nil {
+		parallelism = *job.Spec.Parallelism
+	}
+
+	metaFrame := data.NewFrame("meta",
+		data.NewField("Name", nil, []string{}),
+		data.NewField("Namespace", nil, []string{}),
+		data.NewField("UID", nil, []string{}),
+		data.NewField("Created", nil, []time.Time{}),
+		data.NewField("Owner Kind", nil, []string{}),
+		data.NewField("Owner Name", nil, []string{}),
+		data.NewField("Labels", nil, []json.RawMessage{}),
+		data.NewField("Annotations", nil, []json.RawMessage{}),
+		data.NewField("Kind", nil, []string{}),
+		data.NewField("Completions", nil, []int32{}),
+		data.NewField("Parallelism", nil, []int32{}),
+		data.NewField("Images", nil, []json.RawMessage{}),
+		data.NewField("Succeeded", nil, []int32{}),
+		data.NewField("Active", nil, []int32{}),
+		data.NewField("Failed", nil, []int32{}),
+		data.NewField("Number Desired", nil, []int32{}),
+	)
+	setDetailMeta(metaFrame)
+	metaFrame.AppendRow(
+		job.Name, job.Namespace, string(job.UID), job.CreationTimestamp.Time,
+		ownerKind, ownerName,
+		json.RawMessage(labelsJSON), json.RawMessage(annotationsJSON),
+		"Job",
+		completions, parallelism, json.RawMessage(imagesJSON),
+		job.Status.Succeeded, job.Status.Active, job.Status.Failed,
+		completions,
+	)
+
+	condFrame := data.NewFrame("conditions",
+		data.NewField("Type", nil, []string{}),
+		data.NewField("Status", nil, []string{}),
+		data.NewField("Last Probe Time", nil, []*time.Time{}),
+		data.NewField("Last Transition Time", nil, []*time.Time{}),
+		data.NewField("Reason", nil, []string{}),
+		data.NewField("Message", nil, []string{}),
+	)
+	setDetailMeta(condFrame)
+	for _, cond := range job.Status.Conditions {
+		var lpt, ltt *time.Time
+		if !cond.LastProbeTime.IsZero() {
+			t := cond.LastProbeTime.Time
+			lpt = &t
+		}
+		if !cond.LastTransitionTime.IsZero() {
+			t := cond.LastTransitionTime.Time
+			ltt = &t
+		}
+		condFrame.AppendRow(string(cond.Type), string(cond.Status), lpt, ltt, cond.Reason, cond.Message)
+	}
+
+	evtFrame := buildEventsFrame(ctx, clientset, namespace, name)
+	containersFrame := buildSpecContainersFrame(job.Spec.Template.Spec.Containers)
+	var podMatchLabels map[string]string
+	if job.Spec.Selector != nil {
+		podMatchLabels = job.Spec.Selector.MatchLabels
+	} else {
+		podMatchLabels = job.Spec.Template.Labels
+	}
+	podsFrame, _ := buildPodsSubFrame(ctx, clientset, namespace, podMatchLabels)
+
+	return data.Frames{metaFrame, condFrame, evtFrame, containersFrame, podsFrame}, nil
+}
+
+func getCronJobDetail(ctx context.Context, clientset *kubernetes.Clientset, namespace, name string) (data.Frames, error) {
+	cj, err := clientset.BatchV1().CronJobs(namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return nil, err
+	}
+
+	ownerKind, ownerName := "", ""
+	if len(cj.OwnerReferences) > 0 {
+		ownerKind = cj.OwnerReferences[0].Kind
+		ownerName = cj.OwnerReferences[0].Name
+	}
+	labelsJSON, _ := json.Marshal(cj.Labels)
+	annotationsJSON, _ := json.Marshal(cj.Annotations)
+	suspend := false
+	if cj.Spec.Suspend != nil {
+		suspend = *cj.Spec.Suspend
+	}
+	activeCount := int32(len(cj.Status.Active))
+	var lastSchedule *time.Time
+	if cj.Status.LastScheduleTime != nil {
+		t := cj.Status.LastScheduleTime.Time
+		lastSchedule = &t
+	}
+	startingDeadline := int64(0)
+	if cj.Spec.StartingDeadlineSeconds != nil {
+		startingDeadline = *cj.Spec.StartingDeadlineSeconds
+	}
+
+	metaFrame := data.NewFrame("meta",
+		data.NewField("Name", nil, []string{}),
+		data.NewField("Namespace", nil, []string{}),
+		data.NewField("UID", nil, []string{}),
+		data.NewField("Created", nil, []time.Time{}),
+		data.NewField("Owner Kind", nil, []string{}),
+		data.NewField("Owner Name", nil, []string{}),
+		data.NewField("Labels", nil, []json.RawMessage{}),
+		data.NewField("Annotations", nil, []json.RawMessage{}),
+		data.NewField("Kind", nil, []string{}),
+		data.NewField("Schedule", nil, []string{}),
+		data.NewField("Active Jobs", nil, []int32{}),
+		data.NewField("Suspend", nil, []bool{}),
+		data.NewField("Last Schedule", nil, []*time.Time{}),
+		data.NewField("Concurrency Policy", nil, []string{}),
+		data.NewField("Starting Deadline Seconds", nil, []int64{}),
+	)
+	setDetailMeta(metaFrame)
+	metaFrame.AppendRow(
+		cj.Name, cj.Namespace, string(cj.UID), cj.CreationTimestamp.Time,
+		ownerKind, ownerName,
+		json.RawMessage(labelsJSON), json.RawMessage(annotationsJSON),
+		"CronJob",
+		cj.Spec.Schedule, activeCount, suspend, lastSchedule,
+		string(cj.Spec.ConcurrencyPolicy), startingDeadline,
+	)
+
+	evtFrame := buildEventsFrame(ctx, clientset, namespace, name)
+
+	buildJobSubFrame := func(frameName string) *data.Frame {
+		f := data.NewFrame(frameName,
+			data.NewField("Name", nil, []string{}),
+			data.NewField("Namespace", nil, []string{}),
+			data.NewField("Images", nil, []json.RawMessage{}),
+			data.NewField("Labels", nil, []json.RawMessage{}),
+			data.NewField("Pods", nil, []string{}),
+			data.NewField("Created", nil, []time.Time{}),
+		)
+		setDetailMeta(f)
+		return f
+	}
+
+	activeJobsFrame := buildJobSubFrame("active_jobs")
+	for _, ref := range cj.Status.Active {
+		activeJob, err := clientset.BatchV1().Jobs(namespace).Get(ctx, ref.Name, metav1.GetOptions{})
+		if err != nil {
+			continue
+		}
+		images := make([]string, 0, len(activeJob.Spec.Template.Spec.Containers))
+		for _, c := range activeJob.Spec.Template.Spec.Containers {
+			images = append(images, c.Image)
+		}
+		imagesJSON, _ := json.Marshal(images)
+		jLabelsJSON, _ := json.Marshal(activeJob.Labels)
+		completions := int32(1)
+		if activeJob.Spec.Completions != nil {
+			completions = *activeJob.Spec.Completions
+		}
+		pods := fmt.Sprintf("%d/%d", activeJob.Status.Succeeded, completions)
+		activeJobsFrame.AppendRow(
+			activeJob.Name, activeJob.Namespace,
+			json.RawMessage(imagesJSON), json.RawMessage(jLabelsJSON),
+			pods, activeJob.CreationTimestamp.Time,
+		)
+	}
+
+	inactiveJobsFrame := buildJobSubFrame("inactive_jobs")
+	allJobs, _ := clientset.BatchV1().Jobs(namespace).List(ctx, metav1.ListOptions{})
+	activeNames := make(map[string]bool)
+	for _, ref := range cj.Status.Active {
+		activeNames[ref.Name] = true
+	}
+	if allJobs != nil {
+		for _, j := range allJobs.Items {
+			if activeNames[j.Name] {
+				continue
+			}
+			owned := false
+			for _, owner := range j.OwnerReferences {
+				if owner.Kind == "CronJob" && owner.Name == name {
+					owned = true
+					break
+				}
+			}
+			if !owned {
+				continue
+			}
+			images := make([]string, 0, len(j.Spec.Template.Spec.Containers))
+			for _, c := range j.Spec.Template.Spec.Containers {
+				images = append(images, c.Image)
+			}
+			imagesJSON, _ := json.Marshal(images)
+			jLabelsJSON, _ := json.Marshal(j.Labels)
+			completions := int32(1)
+			if j.Spec.Completions != nil {
+				completions = *j.Spec.Completions
+			}
+			pods := fmt.Sprintf("%d/%d", j.Status.Succeeded, completions)
+			inactiveJobsFrame.AppendRow(
+				j.Name, j.Namespace,
+				json.RawMessage(imagesJSON), json.RawMessage(jLabelsJSON),
+				pods, j.CreationTimestamp.Time,
+			)
+		}
+	}
+
+	return data.Frames{metaFrame, evtFrame, activeJobsFrame, inactiveJobsFrame}, nil
+}
+
+func buildEventsFrame(ctx context.Context, clientset *kubernetes.Clientset, namespace, name string) *data.Frame {
+	f := data.NewFrame("events",
+		data.NewField("Name", nil, []string{}),
+		data.NewField("Reason", nil, []string{}),
+		data.NewField("Message", nil, []string{}),
+		data.NewField("Source", nil, []string{}),
+		data.NewField("Sub Object", nil, []string{}),
+		data.NewField("Count", nil, []int32{}),
+		data.NewField("First Seen", nil, []time.Time{}),
+		data.NewField("Last Seen", nil, []time.Time{}),
+	)
+	setDetailMeta(f)
+	events, _ := clientset.CoreV1().Events(namespace).List(ctx, metav1.ListOptions{
+		FieldSelector: "involvedObject.name=" + name,
+	})
+	if events != nil {
+		for _, evt := range events.Items {
+			source := evt.Source.Component
+			if evt.Source.Host != "" {
+				source += " " + evt.Source.Host
+			}
+			f.AppendRow(
+				evt.Name, evt.Reason, evt.Message,
+				source, evt.InvolvedObject.FieldPath,
+				evt.Count, evt.FirstTimestamp.Time, evt.LastTimestamp.Time,
+			)
+		}
+	}
+	return f
+}
+
+func buildSpecContainersFrame(containers []corev1.Container) *data.Frame {
+	f := data.NewFrame("containers",
+		data.NewField("Name", nil, []string{}),
+		data.NewField("Image", nil, []string{}),
+		data.NewField("Env", nil, []json.RawMessage{}),
+		data.NewField("Command", nil, []json.RawMessage{}),
+		data.NewField("Args", nil, []json.RawMessage{}),
+		data.NewField("Limits", nil, []json.RawMessage{}),
+		data.NewField("Requests", nil, []json.RawMessage{}),
+	)
+	setDetailMeta(f)
+	for _, c := range containers {
+		type envEntry struct {
+			Name  string `json:"name"`
+			Value string `json:"value"`
+		}
+		envEntries := make([]envEntry, 0, len(c.Env))
+		for _, e := range c.Env {
+			val := e.Value
+			if e.ValueFrom != nil {
+				switch {
+				case e.ValueFrom.ConfigMapKeyRef != nil:
+					val = "configmap:" + e.ValueFrom.ConfigMapKeyRef.Name + "/" + e.ValueFrom.ConfigMapKeyRef.Key
+				case e.ValueFrom.SecretKeyRef != nil:
+					val = "secret:" + e.ValueFrom.SecretKeyRef.Name + "/" + e.ValueFrom.SecretKeyRef.Key
+				case e.ValueFrom.FieldRef != nil:
+					val = "fieldRef:" + e.ValueFrom.FieldRef.FieldPath
+				case e.ValueFrom.ResourceFieldRef != nil:
+					val = "resourceFieldRef:" + e.ValueFrom.ResourceFieldRef.Resource
+				}
+			}
+			envEntries = append(envEntries, envEntry{Name: e.Name, Value: val})
+		}
+		envJSON, _ := json.Marshal(envEntries)
+		limits := make(map[string]string)
+		for k, v := range c.Resources.Limits {
+			limits[string(k)] = v.String()
+		}
+		requests := make(map[string]string)
+		for k, v := range c.Resources.Requests {
+			requests[string(k)] = v.String()
+		}
+		limitsJSON, _ := json.Marshal(limits)
+		requestsJSON, _ := json.Marshal(requests)
+		cmdJSON, _ := json.Marshal(c.Command)
+		argsJSON, _ := json.Marshal(c.Args)
+		f.AppendRow(
+			c.Name, c.Image,
+			json.RawMessage(envJSON), json.RawMessage(cmdJSON), json.RawMessage(argsJSON),
+			json.RawMessage(limitsJSON), json.RawMessage(requestsJSON),
+		)
+	}
+	return f
+}
+
+func buildPodsSubFrame(ctx context.Context, clientset *kubernetes.Clientset, namespace string, matchLabels map[string]string) (*data.Frame, error) {
+	parts := make([]string, 0, len(matchLabels))
+	for k, v := range matchLabels {
+		parts = append(parts, k+"="+v)
+	}
+	podList, err := clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: strings.Join(parts, ","),
+	})
+	if err != nil {
+		return nil, err
+	}
+	f := data.NewFrame("pods",
+		data.NewField("Name", nil, []string{}),
+		data.NewField("Namespace", nil, []string{}),
+		data.NewField("Images", nil, []json.RawMessage{}),
+		data.NewField("Labels", nil, []json.RawMessage{}),
+		data.NewField("Node", nil, []string{}),
+		data.NewField("Status", nil, []string{}),
+		data.NewField("Restarts", nil, []int32{}),
+		data.NewField("Created", nil, []time.Time{}),
+	)
+	setDetailMeta(f)
+	for _, pod := range podList.Items {
+		images := make([]string, len(pod.Spec.Containers))
+		for i, c := range pod.Spec.Containers {
+			images[i] = c.Image
+		}
+		imagesJSON, _ := json.Marshal(images)
+		podLabelsJSON, _ := json.Marshal(pod.Labels)
+		var totalRestarts int32
+		for _, cs := range pod.Status.ContainerStatuses {
+			totalRestarts += cs.RestartCount
+		}
+		f.AppendRow(
+			pod.Name, pod.Namespace,
+			json.RawMessage(imagesJSON), json.RawMessage(podLabelsJSON),
+			pod.Spec.NodeName, string(pod.Status.Phase),
+			totalRestarts, pod.CreationTimestamp.Time,
+		)
+	}
+	return f, nil
+}
+
+func buildServicesSubFrame(ctx context.Context, clientset *kubernetes.Clientset, namespace string, podTemplateLabels map[string]string) (*data.Frame, error) {
+	svcList, err := clientset.CoreV1().Services(namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, err
+	}
+	f := data.NewFrame("services",
+		data.NewField("Name", nil, []string{}),
+		data.NewField("Namespace", nil, []string{}),
+		data.NewField("Type", nil, []string{}),
+		data.NewField("Cluster IP", nil, []string{}),
+		data.NewField("Ports", nil, []json.RawMessage{}),
+		data.NewField("Created", nil, []time.Time{}),
+	)
+	setDetailMeta(f)
+	for _, svc := range svcList.Items {
+		if len(svc.Spec.Selector) == 0 {
+			continue
+		}
+		matches := true
+		for k, v := range svc.Spec.Selector {
+			if podTemplateLabels[k] != v {
+				matches = false
+				break
+			}
+		}
+		if !matches {
+			continue
+		}
+		type portInfo struct {
+			Name     string `json:"name"`
+			Port     int32  `json:"port"`
+			Protocol string `json:"protocol"`
+			NodePort int32  `json:"nodePort,omitempty"`
+		}
+		ports := make([]portInfo, len(svc.Spec.Ports))
+		for i, p := range svc.Spec.Ports {
+			ports[i] = portInfo{Name: p.Name, Port: p.Port, Protocol: string(p.Protocol), NodePort: p.NodePort}
+		}
+		portsJSON, _ := json.Marshal(ports)
+		f.AppendRow(
+			svc.Name, svc.Namespace,
+			string(svc.Spec.Type), svc.Spec.ClusterIP,
+			json.RawMessage(portsJSON), svc.CreationTimestamp.Time,
+		)
+	}
+	return f, nil
+}
+
+func getServiceDetail(ctx context.Context, clientset *kubernetes.Clientset, namespace, name string) (data.Frames, error) {
 	svc, err := clientset.CoreV1().Services(namespace).Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
 		return nil, err
 	}
 
-	frame := newDetailFrame()
-	frame.AppendRow("Name", svc.Name)
-	frame.AppendRow("Namespace", svc.Namespace)
-	frame.AppendRow("Type", string(svc.Spec.Type))
-	frame.AppendRow("ClusterIP", svc.Spec.ClusterIP)
-	frame.AppendRow("Labels", labelsToString(svc.Labels))
-	frame.AppendRow("Selector", labelsToString(svc.Spec.Selector))
-	frame.AppendRow("Created", svc.CreationTimestamp.String())
+	ownerKind, ownerName := "", ""
+	if len(svc.OwnerReferences) > 0 {
+		ownerKind = svc.OwnerReferences[0].Kind
+		ownerName = svc.OwnerReferences[0].Name
+	}
+	labelsJSON, _ := json.Marshal(svc.Labels)
+	annotationsJSON, _ := json.Marshal(svc.Annotations)
+	selectorJSON, _ := json.Marshal(svc.Spec.Selector)
 
-	for _, p := range svc.Spec.Ports {
-		portStr := fmt.Sprintf("%d/%s", p.Port, string(p.Protocol))
-		if p.NodePort != 0 {
-			portStr += fmt.Sprintf(" (NodePort: %d)", p.NodePort)
+	metaFrame := data.NewFrame("meta",
+		data.NewField("Name", nil, []string{}),
+		data.NewField("Namespace", nil, []string{}),
+		data.NewField("UID", nil, []string{}),
+		data.NewField("Created", nil, []time.Time{}),
+		data.NewField("Owner Kind", nil, []string{}),
+		data.NewField("Owner Name", nil, []string{}),
+		data.NewField("Labels", nil, []json.RawMessage{}),
+		data.NewField("Annotations", nil, []json.RawMessage{}),
+		data.NewField("Kind", nil, []string{}),
+		data.NewField("Type", nil, []string{}),
+		data.NewField("Cluster IP", nil, []string{}),
+		data.NewField("Session Affinity", nil, []string{}),
+		data.NewField("Selector", nil, []json.RawMessage{}),
+	)
+	setDetailMeta(metaFrame)
+	metaFrame.AppendRow(
+		svc.Name, svc.Namespace, string(svc.UID), svc.CreationTimestamp.Time,
+		ownerKind, ownerName,
+		json.RawMessage(labelsJSON), json.RawMessage(annotationsJSON),
+		"Service",
+		string(svc.Spec.Type), svc.Spec.ClusterIP, string(svc.Spec.SessionAffinity),
+		json.RawMessage(selectorJSON),
+	)
+
+	endpointsFrame := data.NewFrame("endpoints",
+		data.NewField("Host", nil, []string{}),
+		data.NewField("Ports", nil, []string{}),
+		data.NewField("Node", nil, []string{}),
+		data.NewField("Ready", nil, []bool{}),
+	)
+	setDetailMeta(endpointsFrame)
+	eps, _ := clientset.CoreV1().Endpoints(namespace).Get(ctx, name, metav1.GetOptions{})
+	if eps != nil {
+		for _, subset := range eps.Subsets {
+			portParts := make([]string, 0, len(subset.Ports))
+			for _, p := range subset.Ports {
+				portStr := ""
+				if p.Name != "" {
+					portStr = p.Name + ":"
+				}
+				portStr += fmt.Sprintf("%d,%s", p.Port, string(p.Protocol))
+				portParts = append(portParts, portStr)
+			}
+			ports := strings.Join(portParts, "/")
+			for _, addr := range subset.Addresses {
+				node := ""
+				if addr.NodeName != nil {
+					node = *addr.NodeName
+				}
+				endpointsFrame.AppendRow(addr.IP, ports, node, true)
+			}
+			for _, addr := range subset.NotReadyAddresses {
+				node := ""
+				if addr.NodeName != nil {
+					node = *addr.NodeName
+				}
+				endpointsFrame.AppendRow(addr.IP, ports, node, false)
+			}
 		}
-		frame.AppendRow("Port: "+p.Name, portStr)
 	}
 
-	return frame, nil
+	podsFrame, _ := buildPodsSubFrame(ctx, clientset, namespace, svc.Spec.Selector)
+
+	ingressesFrame := data.NewFrame("ingresses",
+		data.NewField("Name", nil, []string{}),
+		data.NewField("Namespace", nil, []string{}),
+		data.NewField("Labels", nil, []json.RawMessage{}),
+		data.NewField("Endpoints", nil, []json.RawMessage{}),
+		data.NewField("Hosts", nil, []json.RawMessage{}),
+		data.NewField("Created", nil, []time.Time{}),
+	)
+	setDetailMeta(ingressesFrame)
+	ingressList, _ := clientset.NetworkingV1().Ingresses(namespace).List(ctx, metav1.ListOptions{})
+	if ingressList != nil {
+		for _, ing := range ingressList.Items {
+			references := false
+			for _, rule := range ing.Spec.Rules {
+				if rule.HTTP == nil {
+					continue
+				}
+				for _, path := range rule.HTTP.Paths {
+					if path.Backend.Service != nil && path.Backend.Service.Name == name {
+						references = true
+						break
+					}
+				}
+				if references {
+					break
+				}
+			}
+			if !references {
+				continue
+			}
+			ingLabelsJSON, _ := json.Marshal(ing.Labels)
+			lbEndpoints := make([]string, 0)
+			for _, lb := range ing.Status.LoadBalancer.Ingress {
+				if lb.Hostname != "" {
+					lbEndpoints = append(lbEndpoints, lb.Hostname)
+				} else if lb.IP != "" {
+					lbEndpoints = append(lbEndpoints, lb.IP)
+				}
+			}
+			endpointsJSON, _ := json.Marshal(lbEndpoints)
+			hosts := make([]string, 0)
+			for _, rule := range ing.Spec.Rules {
+				if rule.Host != "" {
+					hosts = append(hosts, rule.Host)
+				}
+			}
+			hostsJSON, _ := json.Marshal(hosts)
+			ingressesFrame.AppendRow(
+				ing.Name, ing.Namespace,
+				json.RawMessage(ingLabelsJSON),
+				json.RawMessage(endpointsJSON),
+				json.RawMessage(hostsJSON),
+				ing.CreationTimestamp.Time,
+			)
+		}
+	}
+
+	evtFrame := buildEventsFrame(ctx, clientset, namespace, name)
+
+	return data.Frames{metaFrame, endpointsFrame, podsFrame, ingressesFrame, evtFrame}, nil
+}
+
+func getIngressDetail(ctx context.Context, clientset *kubernetes.Clientset, namespace, name string) (data.Frames, error) {
+	ing, err := clientset.NetworkingV1().Ingresses(namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return nil, err
+	}
+
+	ownerKind, ownerName := "", ""
+	if len(ing.OwnerReferences) > 0 {
+		ownerKind = ing.OwnerReferences[0].Kind
+		ownerName = ing.OwnerReferences[0].Name
+	}
+	labelsJSON, _ := json.Marshal(ing.Labels)
+	annotationsJSON, _ := json.Marshal(ing.Annotations)
+	ingressClassName := ""
+	if ing.Spec.IngressClassName != nil {
+		ingressClassName = *ing.Spec.IngressClassName
+	}
+	lbEndpoints := make([]string, 0)
+	for _, lb := range ing.Status.LoadBalancer.Ingress {
+		if lb.Hostname != "" {
+			lbEndpoints = append(lbEndpoints, lb.Hostname)
+		} else if lb.IP != "" {
+			lbEndpoints = append(lbEndpoints, lb.IP)
+		}
+	}
+	endpointsJSON, _ := json.Marshal(lbEndpoints)
+
+	metaFrame := data.NewFrame("meta",
+		data.NewField("Name", nil, []string{}),
+		data.NewField("Namespace", nil, []string{}),
+		data.NewField("UID", nil, []string{}),
+		data.NewField("Created", nil, []time.Time{}),
+		data.NewField("Owner Kind", nil, []string{}),
+		data.NewField("Owner Name", nil, []string{}),
+		data.NewField("Labels", nil, []json.RawMessage{}),
+		data.NewField("Annotations", nil, []json.RawMessage{}),
+		data.NewField("Kind", nil, []string{}),
+		data.NewField("Ingress Class Name", nil, []string{}),
+		data.NewField("Endpoints", nil, []json.RawMessage{}),
+	)
+	setDetailMeta(metaFrame)
+	metaFrame.AppendRow(
+		ing.Name, ing.Namespace, string(ing.UID), ing.CreationTimestamp.Time,
+		ownerKind, ownerName,
+		json.RawMessage(labelsJSON), json.RawMessage(annotationsJSON),
+		"Ingress",
+		ingressClassName, json.RawMessage(endpointsJSON),
+	)
+
+	tlsMap := make(map[string]string)
+	for _, tls := range ing.Spec.TLS {
+		for _, host := range tls.Hosts {
+			tlsMap[host] = tls.SecretName
+		}
+	}
+
+	rulesFrame := data.NewFrame("rules",
+		data.NewField("Host", nil, []string{}),
+		data.NewField("Path", nil, []string{}),
+		data.NewField("Path Type", nil, []string{}),
+		data.NewField("Service Name", nil, []string{}),
+		data.NewField("Service Port", nil, []int32{}),
+		data.NewField("TLS Secret", nil, []string{}),
+	)
+	setDetailMeta(rulesFrame)
+	for _, rule := range ing.Spec.Rules {
+		tlsSecret := tlsMap[rule.Host]
+		if rule.HTTP == nil {
+			rulesFrame.AppendRow(rule.Host, "", "", "", int32(0), tlsSecret)
+			continue
+		}
+		for _, path := range rule.HTTP.Paths {
+			pathType := ""
+			if path.PathType != nil {
+				pathType = string(*path.PathType)
+			}
+			svcName := ""
+			svcPort := int32(0)
+			if path.Backend.Service != nil {
+				svcName = path.Backend.Service.Name
+				svcPort = path.Backend.Service.Port.Number
+			}
+			rulesFrame.AppendRow(rule.Host, path.Path, pathType, svcName, svcPort, tlsSecret)
+		}
+	}
+
+	evtFrame := buildEventsFrame(ctx, clientset, namespace, name)
+
+	return data.Frames{metaFrame, rulesFrame, evtFrame}, nil
+}
+
+func getIngressClassDetail(ctx context.Context, clientset *kubernetes.Clientset, name string) (data.Frames, error) {
+	ic, err := clientset.NetworkingV1().IngressClasses().Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return nil, err
+	}
+
+	labelsJSON, _ := json.Marshal(ic.Labels)
+	annotationsJSON, _ := json.Marshal(ic.Annotations)
+
+	metaFrame := data.NewFrame("meta",
+		data.NewField("Name", nil, []string{}),
+		data.NewField("Namespace", nil, []string{}),
+		data.NewField("UID", nil, []string{}),
+		data.NewField("Created", nil, []time.Time{}),
+		data.NewField("Owner Kind", nil, []string{}),
+		data.NewField("Owner Name", nil, []string{}),
+		data.NewField("Labels", nil, []json.RawMessage{}),
+		data.NewField("Annotations", nil, []json.RawMessage{}),
+		data.NewField("Kind", nil, []string{}),
+		data.NewField("Controller", nil, []string{}),
+	)
+	setDetailMeta(metaFrame)
+	metaFrame.AppendRow(
+		ic.Name, "", string(ic.UID), ic.CreationTimestamp.Time,
+		"", "",
+		json.RawMessage(labelsJSON), json.RawMessage(annotationsJSON),
+		"IngressClass",
+		ic.Spec.Controller,
+	)
+
+	return data.Frames{metaFrame}, nil
 }
 
 func getNodeDetail(ctx context.Context, clientset *kubernetes.Clientset, name string) (*data.Frame, error) {
@@ -1739,4 +2794,815 @@ func getServiceAccounts(ctx context.Context, clientset *kubernetes.Clientset, na
 	}
 
 	return frame, nil
+}
+
+func getConfigMapDetail(ctx context.Context, clientset *kubernetes.Clientset, namespace, name string) (data.Frames, error) {
+	cm, err := clientset.CoreV1().ConfigMaps(namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return nil, err
+	}
+
+	labelsJSON, _ := json.Marshal(cm.Labels)
+	annotationsJSON, _ := json.Marshal(cm.Annotations)
+
+	metaFrame := data.NewFrame("meta",
+		data.NewField("Name", nil, []string{}),
+		data.NewField("Namespace", nil, []string{}),
+		data.NewField("UID", nil, []string{}),
+		data.NewField("Created", nil, []time.Time{}),
+		data.NewField("Owner Kind", nil, []string{}),
+		data.NewField("Owner Name", nil, []string{}),
+		data.NewField("Labels", nil, []json.RawMessage{}),
+		data.NewField("Annotations", nil, []json.RawMessage{}),
+		data.NewField("Kind", nil, []string{}),
+	)
+	setDetailMeta(metaFrame)
+	metaFrame.AppendRow(
+		cm.Name, cm.Namespace, string(cm.UID), cm.CreationTimestamp.Time,
+		"", "",
+		json.RawMessage(labelsJSON), json.RawMessage(annotationsJSON),
+		"ConfigMap",
+	)
+
+	dataJSON, _ := json.Marshal(cm.Data)
+	dataFrame := data.NewFrame("cm_data",
+		data.NewField("Data", nil, []json.RawMessage{}),
+	)
+	dataFrame.AppendRow(json.RawMessage(dataJSON))
+
+	return data.Frames{metaFrame, dataFrame}, nil
+}
+
+func getSecretDetail(ctx context.Context, clientset *kubernetes.Clientset, namespace, name string) (data.Frames, error) {
+	secret, err := clientset.CoreV1().Secrets(namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return nil, err
+	}
+
+	labelsJSON, _ := json.Marshal(secret.Labels)
+	annotationsJSON, _ := json.Marshal(secret.Annotations)
+
+	metaFrame := data.NewFrame("meta",
+		data.NewField("Name", nil, []string{}),
+		data.NewField("Namespace", nil, []string{}),
+		data.NewField("UID", nil, []string{}),
+		data.NewField("Created", nil, []time.Time{}),
+		data.NewField("Owner Kind", nil, []string{}),
+		data.NewField("Owner Name", nil, []string{}),
+		data.NewField("Labels", nil, []json.RawMessage{}),
+		data.NewField("Annotations", nil, []json.RawMessage{}),
+		data.NewField("Kind", nil, []string{}),
+		data.NewField("Type", nil, []string{}),
+	)
+	setDetailMeta(metaFrame)
+	metaFrame.AppendRow(
+		secret.Name, secret.Namespace, string(secret.UID), secret.CreationTimestamp.Time,
+		"", "",
+		json.RawMessage(labelsJSON), json.RawMessage(annotationsJSON),
+		"Secret", string(secret.Type),
+	)
+
+	dataFrame := data.NewFrame("secret_data",
+		data.NewField("Key", nil, []string{}),
+		data.NewField("Value", nil, []string{}),
+		data.NewField("Size", nil, []int64{}),
+	)
+	setDetailMeta(dataFrame)
+	for k, v := range secret.Data {
+		dataFrame.AppendRow(k, base64.StdEncoding.EncodeToString(v), int64(len(v)))
+	}
+
+	return data.Frames{metaFrame, dataFrame}, nil
+}
+
+func getPVCDetail(ctx context.Context, clientset *kubernetes.Clientset, namespace, name string) (data.Frames, error) {
+	pvc, err := clientset.CoreV1().PersistentVolumeClaims(namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return nil, err
+	}
+
+	labelsJSON, _ := json.Marshal(pvc.Labels)
+	annotationsJSON, _ := json.Marshal(pvc.Annotations)
+
+	storageClass := ""
+	if pvc.Spec.StorageClassName != nil {
+		storageClass = *pvc.Spec.StorageClassName
+	}
+	capacity := ""
+	if storage, ok := pvc.Status.Capacity["storage"]; ok {
+		capacity = storage.String()
+	}
+	modes := make([]string, len(pvc.Spec.AccessModes))
+	for i, m := range pvc.Spec.AccessModes {
+		modes[i] = string(m)
+	}
+	modesJSON, _ := json.Marshal(modes)
+
+	ownerKind, ownerName := "", ""
+	if len(pvc.OwnerReferences) > 0 {
+		ownerKind = pvc.OwnerReferences[0].Kind
+		ownerName = pvc.OwnerReferences[0].Name
+	}
+
+	metaFrame := data.NewFrame("meta",
+		data.NewField("Name", nil, []string{}),
+		data.NewField("Namespace", nil, []string{}),
+		data.NewField("UID", nil, []string{}),
+		data.NewField("Created", nil, []time.Time{}),
+		data.NewField("Owner Kind", nil, []string{}),
+		data.NewField("Owner Name", nil, []string{}),
+		data.NewField("Labels", nil, []json.RawMessage{}),
+		data.NewField("Annotations", nil, []json.RawMessage{}),
+		data.NewField("Kind", nil, []string{}),
+		data.NewField("Status", nil, []string{}),
+		data.NewField("Storage Class", nil, []string{}),
+		data.NewField("Volume Name", nil, []string{}),
+		data.NewField("Capacity", nil, []string{}),
+		data.NewField("Access Modes", nil, []json.RawMessage{}),
+	)
+	setDetailMeta(metaFrame)
+	metaFrame.AppendRow(
+		pvc.Name, pvc.Namespace, string(pvc.UID), pvc.CreationTimestamp.Time,
+		ownerKind, ownerName,
+		json.RawMessage(labelsJSON), json.RawMessage(annotationsJSON),
+		"PersistentVolumeClaim",
+		string(pvc.Status.Phase), storageClass, pvc.Spec.VolumeName, capacity,
+		json.RawMessage(modesJSON),
+	)
+
+	return data.Frames{metaFrame}, nil
+}
+
+func getStorageClassDetail(ctx context.Context, clientset *kubernetes.Clientset, name string) (data.Frames, error) {
+	sc, err := clientset.StorageV1().StorageClasses().Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return nil, err
+	}
+
+	labelsJSON, _ := json.Marshal(sc.Labels)
+	annotationsJSON, _ := json.Marshal(sc.Annotations)
+	parametersJSON, _ := json.Marshal(sc.Parameters)
+
+	reclaimPolicy := ""
+	if sc.ReclaimPolicy != nil {
+		reclaimPolicy = string(*sc.ReclaimPolicy)
+	}
+
+	metaFrame := data.NewFrame("meta",
+		data.NewField("Name", nil, []string{}),
+		data.NewField("UID", nil, []string{}),
+		data.NewField("Created", nil, []time.Time{}),
+		data.NewField("Owner Kind", nil, []string{}),
+		data.NewField("Owner Name", nil, []string{}),
+		data.NewField("Labels", nil, []json.RawMessage{}),
+		data.NewField("Annotations", nil, []json.RawMessage{}),
+		data.NewField("Kind", nil, []string{}),
+		data.NewField("Provisioner", nil, []string{}),
+		data.NewField("Parameters", nil, []json.RawMessage{}),
+		data.NewField("Reclaim Policy", nil, []string{}),
+	)
+	setDetailMeta(metaFrame)
+	metaFrame.AppendRow(
+		sc.Name, string(sc.UID), sc.CreationTimestamp.Time,
+		"", "",
+		json.RawMessage(labelsJSON), json.RawMessage(annotationsJSON),
+		"StorageClass",
+		sc.Provisioner, json.RawMessage(parametersJSON), reclaimPolicy,
+	)
+
+	pvList, err := clientset.CoreV1().PersistentVolumes().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, err
+	}
+
+	pvFrame := data.NewFrame("persistent_volumes",
+		data.NewField("Name", nil, []string{}),
+		data.NewField("Capacity", nil, []string{}),
+		data.NewField("Access Modes", nil, []json.RawMessage{}),
+		data.NewField("Reclaim Policy", nil, []string{}),
+		data.NewField("Status", nil, []string{}),
+		data.NewField("Claim", nil, []string{}),
+		data.NewField("Storage Class", nil, []string{}),
+		data.NewField("Reason", nil, []string{}),
+		data.NewField("Created", nil, []time.Time{}),
+	)
+	setDetailMeta(pvFrame)
+
+	for _, pv := range pvList.Items {
+		if pv.Spec.StorageClassName != name {
+			continue
+		}
+		pvCapacity := ""
+		if storage, ok := pv.Spec.Capacity["storage"]; ok {
+			pvCapacity = storage.String()
+		}
+		pvModes := make([]string, len(pv.Spec.AccessModes))
+		for i, m := range pv.Spec.AccessModes {
+			pvModes[i] = string(m)
+		}
+		pvModesJSON, err := json.Marshal(pvModes)
+		if err != nil {
+			return nil, err
+		}
+		claim := ""
+		if pv.Spec.ClaimRef != nil {
+			claim = pv.Spec.ClaimRef.Namespace + "/" + pv.Spec.ClaimRef.Name
+		}
+		pvFrame.AppendRow(
+			pv.Name, pvCapacity, json.RawMessage(pvModesJSON),
+			string(pv.Spec.PersistentVolumeReclaimPolicy),
+			string(pv.Status.Phase), claim, pv.Spec.StorageClassName,
+			pv.Status.Reason, pv.CreationTimestamp.Time,
+		)
+	}
+
+	return data.Frames{metaFrame, pvFrame}, nil
+}
+
+func getNodeDetailRich(ctx context.Context, clientset *kubernetes.Clientset, name string) (data.Frames, error) {
+	node, err := clientset.CoreV1().Nodes().Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return nil, err
+	}
+	labelsJSON, _ := json.Marshal(node.Labels)
+	annotationsJSON, _ := json.Marshal(node.Annotations)
+
+	internalIP, externalIP, hostname := "", "", ""
+	for _, addr := range node.Status.Addresses {
+		switch addr.Type {
+		case "InternalIP":
+			internalIP = addr.Address
+		case "ExternalIP":
+			externalIP = addr.Address
+		case "Hostname":
+			hostname = addr.Address
+		}
+	}
+
+	metaFrame := data.NewFrame("meta",
+		data.NewField("Name", nil, []string{}),
+		data.NewField("UID", nil, []string{}),
+		data.NewField("Created", nil, []time.Time{}),
+		data.NewField("Owner Kind", nil, []string{}),
+		data.NewField("Owner Name", nil, []string{}),
+		data.NewField("Labels", nil, []json.RawMessage{}),
+		data.NewField("Annotations", nil, []json.RawMessage{}),
+		data.NewField("Kind", nil, []string{}),
+		data.NewField("Internal IP", nil, []string{}),
+		data.NewField("External IP", nil, []string{}),
+		data.NewField("Hostname", nil, []string{}),
+	)
+	setDetailMeta(metaFrame)
+	metaFrame.AppendRow(node.Name, string(node.UID), node.CreationTimestamp.Time, "", "",
+		json.RawMessage(labelsJSON), json.RawMessage(annotationsJSON),
+		"Node", internalIP, externalIP, hostname)
+
+	sysFrame := data.NewFrame("node_info",
+		data.NewField("Machine ID", nil, []string{}),
+		data.NewField("System UUID", nil, []string{}),
+		data.NewField("Boot ID", nil, []string{}),
+		data.NewField("Kernel Version", nil, []string{}),
+		data.NewField("OS Image", nil, []string{}),
+		data.NewField("Container Runtime", nil, []string{}),
+		data.NewField("Kubelet Version", nil, []string{}),
+		data.NewField("Kube Proxy Version", nil, []string{}),
+		data.NewField("OS", nil, []string{}),
+		data.NewField("Architecture", nil, []string{}),
+	)
+	setDetailMeta(sysFrame)
+	sysFrame.AppendRow(
+		node.Status.NodeInfo.MachineID,
+		node.Status.NodeInfo.SystemUUID,
+		node.Status.NodeInfo.BootID,
+		node.Status.NodeInfo.KernelVersion,
+		node.Status.NodeInfo.OSImage,
+		node.Status.NodeInfo.ContainerRuntimeVersion,
+		node.Status.NodeInfo.KubeletVersion,
+		node.Status.NodeInfo.KubeProxyVersion,
+		node.Status.NodeInfo.OperatingSystem,
+		node.Status.NodeInfo.Architecture,
+	)
+
+	condFrame := data.NewFrame("conditions",
+		data.NewField("Type", nil, []string{}),
+		data.NewField("Status", nil, []string{}),
+		data.NewField("Last Probe Time", nil, []*time.Time{}),
+		data.NewField("Last Transition Time", nil, []*time.Time{}),
+		data.NewField("Reason", nil, []string{}),
+		data.NewField("Message", nil, []string{}),
+	)
+	setDetailMeta(condFrame)
+	for _, c := range node.Status.Conditions {
+		var lastProbe, lastTransition *time.Time
+		if !c.LastHeartbeatTime.IsZero() {
+			t := c.LastHeartbeatTime.Time
+			lastProbe = &t
+		}
+		if !c.LastTransitionTime.IsZero() {
+			t := c.LastTransitionTime.Time
+			lastTransition = &t
+		}
+		condFrame.AppendRow(string(c.Type), string(c.Status), lastProbe, lastTransition, c.Reason, c.Message)
+	}
+
+	return data.Frames{metaFrame, sysFrame, condFrame}, nil
+}
+
+func getClusterRoleBindingDetail(ctx context.Context, clientset *kubernetes.Clientset, name string) (data.Frames, error) {
+	crb, err := clientset.RbacV1().ClusterRoleBindings().Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return nil, err
+	}
+	labelsJSON, _ := json.Marshal(crb.Labels)
+	annotationsJSON, _ := json.Marshal(crb.Annotations)
+	metaFrame := data.NewFrame("meta",
+		data.NewField("Name", nil, []string{}),
+		data.NewField("UID", nil, []string{}),
+		data.NewField("Created", nil, []time.Time{}),
+		data.NewField("Owner Kind", nil, []string{}),
+		data.NewField("Owner Name", nil, []string{}),
+		data.NewField("Labels", nil, []json.RawMessage{}),
+		data.NewField("Annotations", nil, []json.RawMessage{}),
+		data.NewField("Kind", nil, []string{}),
+		data.NewField("Role Reference", nil, []string{}),
+		data.NewField("Role Ref Kind", nil, []string{}),
+	)
+	setDetailMeta(metaFrame)
+	metaFrame.AppendRow(crb.Name, string(crb.UID), crb.CreationTimestamp.Time, "", "",
+		json.RawMessage(labelsJSON), json.RawMessage(annotationsJSON),
+		"ClusterRoleBinding", crb.RoleRef.Name, crb.RoleRef.Kind)
+
+	subjectsFrame := data.NewFrame("subjects",
+		data.NewField("Name", nil, []string{}),
+		data.NewField("Namespace", nil, []string{}),
+		data.NewField("Kind", nil, []string{}),
+		data.NewField("API Group", nil, []string{}),
+	)
+	setDetailMeta(subjectsFrame)
+	for _, s := range crb.Subjects {
+		subjectsFrame.AppendRow(s.Name, s.Namespace, s.Kind, s.APIGroup)
+	}
+	return data.Frames{metaFrame, subjectsFrame}, nil
+}
+
+func getClusterRoleDetail(ctx context.Context, clientset *kubernetes.Clientset, name string) (data.Frames, error) {
+	cr, err := clientset.RbacV1().ClusterRoles().Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return nil, err
+	}
+	labelsJSON, _ := json.Marshal(cr.Labels)
+	annotationsJSON, _ := json.Marshal(cr.Annotations)
+	metaFrame := data.NewFrame("meta",
+		data.NewField("Name", nil, []string{}),
+		data.NewField("UID", nil, []string{}),
+		data.NewField("Created", nil, []time.Time{}),
+		data.NewField("Owner Kind", nil, []string{}),
+		data.NewField("Owner Name", nil, []string{}),
+		data.NewField("Labels", nil, []json.RawMessage{}),
+		data.NewField("Annotations", nil, []json.RawMessage{}),
+		data.NewField("Kind", nil, []string{}),
+	)
+	setDetailMeta(metaFrame)
+	metaFrame.AppendRow(cr.Name, string(cr.UID), cr.CreationTimestamp.Time, "", "",
+		json.RawMessage(labelsJSON), json.RawMessage(annotationsJSON), "ClusterRole")
+
+	rulesFrame := data.NewFrame("rbac_rules",
+		data.NewField("Resources", nil, []string{}),
+		data.NewField("Non-resource URLs", nil, []string{}),
+		data.NewField("Resource Names", nil, []string{}),
+		data.NewField("Verbs", nil, []string{}),
+		data.NewField("API Groups", nil, []string{}),
+	)
+	setDetailMeta(rulesFrame)
+	for _, rule := range cr.Rules {
+		resources := strings.Join(rule.Resources, ", ")
+		nonResourceURLs := strings.Join(rule.NonResourceURLs, ", ")
+		resourceNames := strings.Join(rule.ResourceNames, ", ")
+		verbs := strings.Join(rule.Verbs, ", ")
+		apiGroups := strings.Join(rule.APIGroups, ", ")
+		if resources == "" {
+			resources = "-"
+		}
+		if nonResourceURLs == "" {
+			nonResourceURLs = "-"
+		}
+		if resourceNames == "" {
+			resourceNames = "-"
+		}
+		rulesFrame.AppendRow(resources, nonResourceURLs, resourceNames, verbs, apiGroups)
+	}
+	return data.Frames{metaFrame, rulesFrame}, nil
+}
+
+func getNamespaceDetail(ctx context.Context, clientset *kubernetes.Clientset, name string) (data.Frames, error) {
+	ns, err := clientset.CoreV1().Namespaces().Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return nil, err
+	}
+	labelsJSON, _ := json.Marshal(ns.Labels)
+	annotationsJSON, _ := json.Marshal(ns.Annotations)
+	metaFrame := data.NewFrame("meta",
+		data.NewField("Name", nil, []string{}),
+		data.NewField("UID", nil, []string{}),
+		data.NewField("Created", nil, []time.Time{}),
+		data.NewField("Owner Kind", nil, []string{}),
+		data.NewField("Owner Name", nil, []string{}),
+		data.NewField("Labels", nil, []json.RawMessage{}),
+		data.NewField("Annotations", nil, []json.RawMessage{}),
+		data.NewField("Kind", nil, []string{}),
+		data.NewField("Status", nil, []string{}),
+	)
+	setDetailMeta(metaFrame)
+	metaFrame.AppendRow(ns.Name, string(ns.UID), ns.CreationTimestamp.Time, "", "",
+		json.RawMessage(labelsJSON), json.RawMessage(annotationsJSON),
+		"Namespace", string(ns.Status.Phase))
+	return data.Frames{metaFrame}, nil
+}
+
+func getNetworkPolicyDetail(ctx context.Context, clientset *kubernetes.Clientset, namespace, name string) (data.Frames, error) {
+	np, err := clientset.NetworkingV1().NetworkPolicies(namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return nil, err
+	}
+	labelsJSON, _ := json.Marshal(np.Labels)
+	annotationsJSON, _ := json.Marshal(np.Annotations)
+	types := make([]string, len(np.Spec.PolicyTypes))
+	for i, t := range np.Spec.PolicyTypes {
+		types[i] = string(t)
+	}
+	typesJSON, _ := json.Marshal(types)
+	podSelector := metav1.FormatLabelSelector(&np.Spec.PodSelector)
+	metaFrame := data.NewFrame("meta",
+		data.NewField("Name", nil, []string{}),
+		data.NewField("Namespace", nil, []string{}),
+		data.NewField("UID", nil, []string{}),
+		data.NewField("Created", nil, []time.Time{}),
+		data.NewField("Owner Kind", nil, []string{}),
+		data.NewField("Owner Name", nil, []string{}),
+		data.NewField("Labels", nil, []json.RawMessage{}),
+		data.NewField("Annotations", nil, []json.RawMessage{}),
+		data.NewField("Kind", nil, []string{}),
+		data.NewField("Pod Selector", nil, []string{}),
+		data.NewField("Policy Types", nil, []json.RawMessage{}),
+	)
+	setDetailMeta(metaFrame)
+	metaFrame.AppendRow(np.Name, np.Namespace, string(np.UID), np.CreationTimestamp.Time, "", "",
+		json.RawMessage(labelsJSON), json.RawMessage(annotationsJSON),
+		"NetworkPolicy", podSelector, json.RawMessage(typesJSON))
+	return data.Frames{metaFrame}, nil
+}
+
+func getPersistentVolumeDetail(ctx context.Context, clientset *kubernetes.Clientset, name string) (data.Frames, error) {
+	pv, err := clientset.CoreV1().PersistentVolumes().Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return nil, err
+	}
+	labelsJSON, _ := json.Marshal(pv.Labels)
+	annotationsJSON, _ := json.Marshal(pv.Annotations)
+	modes := make([]string, len(pv.Spec.AccessModes))
+	for i, m := range pv.Spec.AccessModes {
+		modes[i] = string(m)
+	}
+	modesJSON, _ := json.Marshal(modes)
+	claim := ""
+	claimNamespace := ""
+	claimName := ""
+	if pv.Spec.ClaimRef != nil {
+		claimNamespace = pv.Spec.ClaimRef.Namespace
+		claimName = pv.Spec.ClaimRef.Name
+		claim = claimNamespace + "/" + claimName
+	}
+	reclaimPolicy := string(pv.Spec.PersistentVolumeReclaimPolicy)
+	metaFrame := data.NewFrame("meta",
+		data.NewField("Name", nil, []string{}),
+		data.NewField("UID", nil, []string{}),
+		data.NewField("Created", nil, []time.Time{}),
+		data.NewField("Owner Kind", nil, []string{}),
+		data.NewField("Owner Name", nil, []string{}),
+		data.NewField("Labels", nil, []json.RawMessage{}),
+		data.NewField("Annotations", nil, []json.RawMessage{}),
+		data.NewField("Kind", nil, []string{}),
+		data.NewField("Status", nil, []string{}),
+		data.NewField("Claim", nil, []string{}),
+		data.NewField("Claim Namespace", nil, []string{}),
+		data.NewField("Claim Name", nil, []string{}),
+		data.NewField("Reclaim Policy", nil, []string{}),
+		data.NewField("Storage Class", nil, []string{}),
+		data.NewField("Access Modes", nil, []json.RawMessage{}),
+	)
+	setDetailMeta(metaFrame)
+	metaFrame.AppendRow(pv.Name, string(pv.UID), pv.CreationTimestamp.Time, "", "",
+		json.RawMessage(labelsJSON), json.RawMessage(annotationsJSON),
+		"PersistentVolume", string(pv.Status.Phase), claim, claimNamespace, claimName,
+		reclaimPolicy, pv.Spec.StorageClassName, json.RawMessage(modesJSON))
+
+	sourceFrame := data.NewFrame("pv_source",
+		data.NewField("Type", nil, []string{}),
+		data.NewField("Filesystem Type", nil, []string{}),
+		data.NewField("Volume ID", nil, []string{}),
+	)
+	setDetailMeta(sourceFrame)
+	pvType := ""
+	fsType := ""
+	volumeID := ""
+	switch {
+	case pv.Spec.AWSElasticBlockStore != nil:
+		pvType = "EBS (AWS Elastic Block Store)"
+		fsType = pv.Spec.AWSElasticBlockStore.FSType
+		volumeID = pv.Spec.AWSElasticBlockStore.VolumeID
+	case pv.Spec.GCEPersistentDisk != nil:
+		pvType = "GCE Persistent Disk"
+		fsType = pv.Spec.GCEPersistentDisk.FSType
+		volumeID = pv.Spec.GCEPersistentDisk.PDName
+	case pv.Spec.HostPath != nil:
+		pvType = "Host Path"
+		volumeID = pv.Spec.HostPath.Path
+	case pv.Spec.NFS != nil:
+		pvType = "NFS"
+		volumeID = pv.Spec.NFS.Server + ":" + pv.Spec.NFS.Path
+	case pv.Spec.CSI != nil:
+		pvType = "CSI (" + pv.Spec.CSI.Driver + ")"
+		fsType = pv.Spec.CSI.FSType
+		volumeID = pv.Spec.CSI.VolumeHandle
+	}
+	sourceFrame.AppendRow(pvType, fsType, volumeID)
+
+	capacityFrame := data.NewFrame("pv_capacity",
+		data.NewField("Resource Name", nil, []string{}),
+		data.NewField("Quantity", nil, []string{}),
+	)
+	setDetailMeta(capacityFrame)
+	for k, v := range pv.Spec.Capacity {
+		capacityFrame.AppendRow(string(k), v.String())
+	}
+	return data.Frames{metaFrame, sourceFrame, capacityFrame}, nil
+}
+
+func getRoleBindingDetail(ctx context.Context, clientset *kubernetes.Clientset, namespace, name string) (data.Frames, error) {
+	rb, err := clientset.RbacV1().RoleBindings(namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return nil, err
+	}
+	labelsJSON, _ := json.Marshal(rb.Labels)
+	annotationsJSON, _ := json.Marshal(rb.Annotations)
+	metaFrame := data.NewFrame("meta",
+		data.NewField("Name", nil, []string{}),
+		data.NewField("Namespace", nil, []string{}),
+		data.NewField("UID", nil, []string{}),
+		data.NewField("Created", nil, []time.Time{}),
+		data.NewField("Owner Kind", nil, []string{}),
+		data.NewField("Owner Name", nil, []string{}),
+		data.NewField("Labels", nil, []json.RawMessage{}),
+		data.NewField("Annotations", nil, []json.RawMessage{}),
+		data.NewField("Kind", nil, []string{}),
+		data.NewField("Role Reference", nil, []string{}),
+		data.NewField("Role Ref Kind", nil, []string{}),
+	)
+	setDetailMeta(metaFrame)
+	metaFrame.AppendRow(rb.Name, rb.Namespace, string(rb.UID), rb.CreationTimestamp.Time, "", "",
+		json.RawMessage(labelsJSON), json.RawMessage(annotationsJSON),
+		"RoleBinding", rb.RoleRef.Name, rb.RoleRef.Kind)
+
+	subjectsFrame := data.NewFrame("subjects",
+		data.NewField("Name", nil, []string{}),
+		data.NewField("Namespace", nil, []string{}),
+		data.NewField("Kind", nil, []string{}),
+		data.NewField("API Group", nil, []string{}),
+	)
+	setDetailMeta(subjectsFrame)
+	for _, s := range rb.Subjects {
+		subjectsFrame.AppendRow(s.Name, s.Namespace, s.Kind, s.APIGroup)
+	}
+	return data.Frames{metaFrame, subjectsFrame}, nil
+}
+
+func getRoleDetail(ctx context.Context, clientset *kubernetes.Clientset, namespace, name string) (data.Frames, error) {
+	role, err := clientset.RbacV1().Roles(namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return nil, err
+	}
+	labelsJSON, _ := json.Marshal(role.Labels)
+	annotationsJSON, _ := json.Marshal(role.Annotations)
+	metaFrame := data.NewFrame("meta",
+		data.NewField("Name", nil, []string{}),
+		data.NewField("Namespace", nil, []string{}),
+		data.NewField("UID", nil, []string{}),
+		data.NewField("Created", nil, []time.Time{}),
+		data.NewField("Owner Kind", nil, []string{}),
+		data.NewField("Owner Name", nil, []string{}),
+		data.NewField("Labels", nil, []json.RawMessage{}),
+		data.NewField("Annotations", nil, []json.RawMessage{}),
+		data.NewField("Kind", nil, []string{}),
+	)
+	setDetailMeta(metaFrame)
+	metaFrame.AppendRow(role.Name, role.Namespace, string(role.UID), role.CreationTimestamp.Time, "", "",
+		json.RawMessage(labelsJSON), json.RawMessage(annotationsJSON), "Role")
+
+	rulesFrame := data.NewFrame("rbac_rules",
+		data.NewField("Resources", nil, []string{}),
+		data.NewField("Non-resource URLs", nil, []string{}),
+		data.NewField("Resource Names", nil, []string{}),
+		data.NewField("Verbs", nil, []string{}),
+		data.NewField("API Groups", nil, []string{}),
+	)
+	setDetailMeta(rulesFrame)
+	for _, rule := range role.Rules {
+		resources := strings.Join(rule.Resources, ", ")
+		nonResourceURLs := strings.Join(rule.NonResourceURLs, ", ")
+		resourceNames := strings.Join(rule.ResourceNames, ", ")
+		verbs := strings.Join(rule.Verbs, ", ")
+		apiGroups := strings.Join(rule.APIGroups, ", ")
+		if resources == "" {
+			resources = "-"
+		}
+		if nonResourceURLs == "" {
+			nonResourceURLs = "-"
+		}
+		if resourceNames == "" {
+			resourceNames = "-"
+		}
+		rulesFrame.AppendRow(resources, nonResourceURLs, resourceNames, verbs, apiGroups)
+	}
+	return data.Frames{metaFrame, rulesFrame}, nil
+}
+
+func getServiceAccountDetail(ctx context.Context, clientset *kubernetes.Clientset, namespace, name string) (data.Frames, error) {
+	sa, err := clientset.CoreV1().ServiceAccounts(namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return nil, err
+	}
+	labelsJSON, _ := json.Marshal(sa.Labels)
+	annotationsJSON, _ := json.Marshal(sa.Annotations)
+	metaFrame := data.NewFrame("meta",
+		data.NewField("Name", nil, []string{}),
+		data.NewField("Namespace", nil, []string{}),
+		data.NewField("UID", nil, []string{}),
+		data.NewField("Created", nil, []time.Time{}),
+		data.NewField("Owner Kind", nil, []string{}),
+		data.NewField("Owner Name", nil, []string{}),
+		data.NewField("Labels", nil, []json.RawMessage{}),
+		data.NewField("Annotations", nil, []json.RawMessage{}),
+		data.NewField("Kind", nil, []string{}),
+	)
+	setDetailMeta(metaFrame)
+	metaFrame.AppendRow(sa.Name, sa.Namespace, string(sa.UID), sa.CreationTimestamp.Time, "", "",
+		json.RawMessage(labelsJSON), json.RawMessage(annotationsJSON), "ServiceAccount")
+
+	secretsFrame := data.NewFrame("sa_secrets",
+		data.NewField("Name", nil, []string{}),
+	)
+	setDetailMeta(secretsFrame)
+	for _, s := range sa.Secrets {
+		secretsFrame.AppendRow(s.Name)
+	}
+
+	imagePullSecretsFrame := data.NewFrame("sa_image_pull_secrets",
+		data.NewField("Name", nil, []string{}),
+	)
+	setDetailMeta(imagePullSecretsFrame)
+	for _, s := range sa.ImagePullSecrets {
+		imagePullSecretsFrame.AppendRow(s.Name)
+	}
+	return data.Frames{metaFrame, secretsFrame, imagePullSecretsFrame}, nil
+}
+
+func getCRDDetail(ctx context.Context, clientset *kubernetes.Clientset, name string) (data.Frames, error) {
+	rawBytes, err := clientset.RESTClient().Get().
+		AbsPath("/apis/apiextensions.k8s.io/v1/customresourcedefinitions/" + name).
+		DoRaw(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	var crd struct {
+		Metadata struct {
+			Name              string            `json:"name"`
+			UID               string            `json:"uid"`
+			Labels            map[string]string `json:"labels"`
+			Annotations       map[string]string `json:"annotations"`
+			CreationTimestamp time.Time         `json:"creationTimestamp"`
+		} `json:"metadata"`
+		Spec struct {
+			Group string `json:"group"`
+			Scope string `json:"scope"`
+			Names struct {
+				Plural     string   `json:"plural"`
+				Singular   string   `json:"singular"`
+				Kind       string   `json:"kind"`
+				ListKind   string   `json:"listKind"`
+				ShortNames []string `json:"shortNames"`
+			} `json:"names"`
+			Versions []struct {
+				Name         string `json:"name"`
+				Served       bool   `json:"served"`
+				Storage      bool   `json:"storage"`
+				Subresources struct {
+					Status *struct{} `json:"status"`
+					Scale  *struct{} `json:"scale"`
+				} `json:"subresources"`
+			} `json:"versions"`
+		} `json:"spec"`
+		Status struct {
+			Conditions []struct {
+				Type               string    `json:"type"`
+				Status             string    `json:"status"`
+				LastTransitionTime time.Time `json:"lastTransitionTime"`
+				Reason             string    `json:"reason"`
+				Message            string    `json:"message"`
+			} `json:"conditions"`
+		} `json:"status"`
+	}
+	if err := json.Unmarshal(rawBytes, &crd); err != nil {
+		return nil, err
+	}
+
+	labelsJSON, _ := json.Marshal(crd.Metadata.Labels)
+	annotationsJSON, _ := json.Marshal(crd.Metadata.Annotations)
+
+	// Build subresources string from first served storage version
+	subresources := "-"
+	for _, v := range crd.Spec.Versions {
+		if v.Storage {
+			var parts []string
+			if v.Subresources.Status != nil {
+				parts = append(parts, "status")
+			}
+			if v.Subresources.Scale != nil {
+				parts = append(parts, "scale")
+			}
+			if len(parts) > 0 {
+				subresources = strings.Join(parts, ", ")
+			}
+			break
+		}
+	}
+
+	// Version string from storage version
+	version := "-"
+	for _, v := range crd.Spec.Versions {
+		if v.Storage {
+			version = v.Name
+			break
+		}
+	}
+
+	metaFrame := data.NewFrame("meta",
+		data.NewField("Name", nil, []string{}),
+		data.NewField("UID", nil, []string{}),
+		data.NewField("Created", nil, []time.Time{}),
+		data.NewField("Labels", nil, []json.RawMessage{}),
+		data.NewField("Annotations", nil, []json.RawMessage{}),
+		data.NewField("Kind", nil, []string{}),
+		data.NewField("Version", nil, []string{}),
+		data.NewField("Scope", nil, []string{}),
+		data.NewField("Group", nil, []string{}),
+		data.NewField("Subresources", nil, []string{}),
+	)
+	setDetailMeta(metaFrame)
+	metaFrame.AppendRow(
+		crd.Metadata.Name, crd.Metadata.UID, crd.Metadata.CreationTimestamp,
+		json.RawMessage(labelsJSON), json.RawMessage(annotationsJSON),
+		"CustomResourceDefinition", version, crd.Spec.Scope, crd.Spec.Group, subresources,
+	)
+
+	namesFrame := data.NewFrame("crd_names",
+		data.NewField("Plural", nil, []string{}),
+		data.NewField("Singular", nil, []string{}),
+		data.NewField("Kind", nil, []string{}),
+		data.NewField("List Kind", nil, []string{}),
+		data.NewField("Short Names", nil, []string{}),
+	)
+	setDetailMeta(namesFrame)
+	shortNames := strings.Join(crd.Spec.Names.ShortNames, ", ")
+	namesFrame.AppendRow(
+		crd.Spec.Names.Plural,
+		crd.Spec.Names.Singular,
+		crd.Spec.Names.Kind,
+		crd.Spec.Names.ListKind,
+		shortNames,
+	)
+
+	versionsFrame := data.NewFrame("crd_versions",
+		data.NewField("Name", nil, []string{}),
+		data.NewField("Served", nil, []bool{}),
+		data.NewField("Storage", nil, []bool{}),
+	)
+	setDetailMeta(versionsFrame)
+	for _, v := range crd.Spec.Versions {
+		versionsFrame.AppendRow(v.Name, v.Served, v.Storage)
+	}
+
+	conditionsFrame := data.NewFrame("conditions",
+		data.NewField("Type", nil, []string{}),
+		data.NewField("Status", nil, []string{}),
+		data.NewField("Last Transition Time", nil, []time.Time{}),
+		data.NewField("Reason", nil, []string{}),
+		data.NewField("Message", nil, []string{}),
+	)
+	setDetailMeta(conditionsFrame)
+	for _, c := range crd.Status.Conditions {
+		conditionsFrame.AppendRow(c.Type, c.Status, c.LastTransitionTime, c.Reason, c.Message)
+	}
+
+	return data.Frames{metaFrame, namesFrame, versionsFrame, conditionsFrame}, nil
 }
