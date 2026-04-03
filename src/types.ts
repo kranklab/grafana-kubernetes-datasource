@@ -2,7 +2,7 @@ import { DataSourceJsonData } from '@grafana/data';
 import { DataQuery } from '@grafana/schema';
 
 export interface KubernetesQuery extends DataQuery {
-  action: string | 'get' | 'list' | 'summary';
+  action: string | 'get' | 'list' | 'summary' | 'yaml';
   namespace: string;
   resource: string;
   name?: string;
@@ -35,6 +35,7 @@ export interface KubernetesDatasourceOptions extends DataSourceJsonData {
   clientKey?: string;
   caCert?: string;
   url?: string;
+  defaultNamespace?: string;
   awsRegion?: string;
   eksClusterName?: string;
   awsIamMode?: 'user' | 'role';

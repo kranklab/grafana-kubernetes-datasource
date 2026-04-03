@@ -5,18 +5,22 @@ import { lastValueFrom } from 'rxjs';
 import { KubernetesQuery, KubernetesDatasourceOptions, DEFAULT_QUERY } from './types';
 
 export class DataSource extends DataSourceWithBackend<KubernetesQuery, KubernetesDatasourceOptions> {
+  defaultNamespace: string;
+
   constructor(instanceSettings: DataSourceInstanceSettings<KubernetesDatasourceOptions>) {
     super(instanceSettings);
+    this.defaultNamespace = instanceSettings.jsonData.defaultNamespace || 'default';
   }
 
   getDefaultQuery(_: CoreApp): Partial<KubernetesQuery> {
-    return DEFAULT_QUERY;
+    return { ...DEFAULT_QUERY, namespace: this.defaultNamespace };
   }
 
   applyTemplateVariables(query: KubernetesQuery, scopedVars: ScopedVars) {
+    const ns = getTemplateSrv().replace(query.namespace ?? '', scopedVars);
     return {
       ...query,
-      namespace: getTemplateSrv().replace(query.namespace ?? '', scopedVars),
+      namespace: ns || this.defaultNamespace,
     };
   }
 

@@ -32,6 +32,9 @@ const RESOURCE_OPTIONS: ComboboxOption[] = [
   { label: 'Cluster Roles', value: 'clusterroles' },
   { label: 'Cluster Role Bindings', value: 'clusterrolebindings' },
   { label: 'CRDs', value: 'crds' },
+  { label: 'IngressRoutes (Traefik)', value: 'ingressroutes' },
+  { label: 'Middlewares (Traefik)', value: 'middlewares' },
+  { label: 'TraefikServices', value: 'traefikservices' },
 ];
 
 export function QueryEditor({ query, onChange, onRunQuery, datasource }: Props) {

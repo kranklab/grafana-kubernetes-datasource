@@ -230,6 +230,20 @@ export function ConfigEditor(props: Props) {
 
   return (
     <>
+      <InlineField label="Default namespace" labelWidth={20} interactive tooltip={'The default namespace used when no namespace is specified in a query. Leave empty for "default".'}>
+        <Input
+          id="config-editor-default-namespace"
+          onChange={(event: ChangeEvent<HTMLInputElement>) => {
+            onOptionsChange({ ...options, jsonData: { ...jsonData, defaultNamespace: event.target.value } });
+          }}
+          value={jsonData.defaultNamespace ?? ''}
+          placeholder="default"
+          width={40}
+        />
+      </InlineField>
+
+      <br />
+
       {certInputMode !== 'aws' && (
         <InlineField label="Kubernetes URL" labelWidth={20} interactive tooltip={'The url for the kubernetes control plane.'}>
           <Input

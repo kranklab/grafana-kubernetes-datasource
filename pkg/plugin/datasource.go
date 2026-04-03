@@ -1,6 +1,7 @@
 package plugin
 
 import (
+	"bufio"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -9,8 +10,12 @@ import (
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
 	"github.com/grafana/grafana-plugin-sdk-go/backend/instancemgmt"
 	"github.com/grafana/grafana-plugin-sdk-go/data"
+	"gopkg.in/yaml.v3"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/discovery"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"strings"
@@ -71,6 +76,7 @@ type queryModel struct {
 	Name          string `json:"name"`
 	LabelSelector string `json:"labelSelector"`
 	NodeName      string `json:"nodeName"`
+	Container     string `json:"container"`
 }
 
 type jsonData struct {
@@ -167,6 +173,18 @@ func (d *Datasource) query(ctx context.Context, pCtx backend.PluginContext, quer
 		response.Frames = append(response.Frames, frames...)
 	case "list":
 		frame, err := d.runListQuery(ctx, pCtx, qm)
+		if err != nil {
+			return backend.ErrDataResponse(backend.StatusInternal, fmt.Sprintf("request failed: %v", err.Error()))
+		}
+		response.Frames = append(response.Frames, frame)
+	case "logs":
+		frame, err := d.runLogsQuery(ctx, pCtx, qm)
+		if err != nil {
+			return backend.ErrDataResponse(backend.StatusInternal, fmt.Sprintf("request failed: %v", err.Error()))
+		}
+		response.Frames = append(response.Frames, frame)
+	case "yaml":
+		frame, err := d.runYAMLQuery(ctx, pCtx, qm)
 		if err != nil {
 			return backend.ErrDataResponse(backend.StatusInternal, fmt.Sprintf("request failed: %v", err.Error()))
 		}
@@ -329,7 +347,16 @@ func (d *Datasource) runListQuery(ctx context.Context, pCtx backend.PluginContex
 		return getServiceAccounts(ctx, clientset, namespace, listOpts)
 	}
 
-	return nil, fmt.Errorf("resource not recognized: %s", qm.Resource)
+	// Fallback: try to discover as a custom resource
+	gvr, err := discoverCR(clientset.Discovery(), qm.Resource)
+	if err != nil {
+		return nil, fmt.Errorf("resource not recognized: %s (%v)", qm.Resource, err)
+	}
+	dynClient, err := dynamic.NewForConfig(kubeConfig)
+	if err != nil {
+		return nil, err
+	}
+	return listCustomResources(ctx, dynClient, gvr, namespace, listOpts)
 }
 
 func (d *Datasource) runSummaryQuery(ctx context.Context, pCtx backend.PluginContext, _ queryModel) (*data.Frame, error) {
@@ -447,16 +474,217 @@ func (d *Datasource) runGetQuery(ctx context.Context, pCtx backend.PluginContext
 	case "crds", "crd", "customresourcedefinitions":
 		return getCRDDetail(ctx, clientset, qm.Name)
 	default:
-		return nil, fmt.Errorf("get not supported for resource: %s", qm.Resource)
+		gvr, err := discoverCR(clientset.Discovery(), qm.Resource)
+		if err != nil {
+			return nil, fmt.Errorf("get not supported for resource: %s (%v)", qm.Resource, err)
+		}
+		dynClient, err := dynamic.NewForConfig(kubeConfig)
+		if err != nil {
+			return nil, err
+		}
+		return getCustomResourceDetail(ctx, dynClient, gvr, namespace, qm.Name)
 	}
 }
 
-// newDetailFrame returns a frame with "property" and "value" columns for detail views.
-func newDetailFrame() *data.Frame {
-	return data.NewFrame("Workloads",
-		data.NewField("Property", nil, []string{}),
-		data.NewField("Value", nil, []string{}),
+func (d *Datasource) runLogsQuery(ctx context.Context, pCtx backend.PluginContext, qm queryModel) (*data.Frame, error) {
+	var jdata jsonData
+	if err := json.Unmarshal(pCtx.DataSourceInstanceSettings.JSONData, &jdata); err != nil {
+		return nil, err
+	}
+	secrets := pCtx.DataSourceInstanceSettings.DecryptedSecureJSONData
+	kubeConfig, err := buildKubeConfig(ctx, jdata, secrets)
+	if err != nil {
+		return nil, err
+	}
+	clientset, err := kubernetes.NewForConfig(kubeConfig)
+	if err != nil {
+		return nil, err
+	}
+
+	namespace := qm.Namespace
+	if namespace == "_all" || namespace == "" {
+		namespace = "default"
+	}
+
+	frame := data.NewFrame("logs",
+		data.NewField("Timestamp", nil, []time.Time{}),
+		data.NewField("Container", nil, []string{}),
+		data.NewField("Message", nil, []string{}),
 	)
+
+	var containers []string
+	if qm.Container != "" {
+		containers = []string{qm.Container}
+	} else {
+		pod, err := clientset.CoreV1().Pods(namespace).Get(ctx, qm.Name, metav1.GetOptions{})
+		if err != nil {
+			return nil, err
+		}
+		for _, c := range pod.Spec.Containers {
+			containers = append(containers, c.Name)
+		}
+	}
+
+	tailLines := int64(200)
+	for _, containerName := range containers {
+		req := clientset.CoreV1().Pods(namespace).GetLogs(qm.Name, &corev1.PodLogOptions{
+			Container:  containerName,
+			Timestamps: true,
+			TailLines:  &tailLines,
+		})
+		stream, err := req.Stream(ctx)
+		if err != nil {
+			continue
+		}
+		scanner := bufio.NewScanner(stream)
+		for scanner.Scan() {
+			line := scanner.Text()
+			parts := strings.SplitN(line, " ", 2)
+			ts := time.Time{}
+			msg := line
+			if len(parts) == 2 {
+				if t, err := time.Parse(time.RFC3339Nano, parts[0]); err == nil {
+					ts = t
+					msg = parts[1]
+				}
+			}
+			frame.AppendRow(ts, containerName, msg)
+		}
+		_ = stream.Close()
+	}
+
+	return frame, nil
+}
+
+type resourceInfo struct {
+	apiPath    string // e.g. "/api/v1" or "/apis/apps/v1"
+	resource   string // e.g. "pods", "deployments"
+	namespaced bool
+}
+
+var resourceMap = map[string]resourceInfo{
+	"pods":                      {"/api/v1", "pods", true},
+	"services":                  {"/api/v1", "services", true},
+	"configmaps":                {"/api/v1", "configmaps", true},
+	"secrets":                   {"/api/v1", "secrets", true},
+	"serviceaccounts":           {"/api/v1", "serviceaccounts", true},
+	"persistentvolumeclaims":    {"/api/v1", "persistentvolumeclaims", true},
+	"events":                    {"/api/v1", "events", true},
+	"namespaces":                {"/api/v1", "namespaces", false},
+	"nodes":                     {"/api/v1", "nodes", false},
+	"persistentvolumes":         {"/api/v1", "persistentvolumes", false},
+	"deployments":               {"/apis/apps/v1", "deployments", true},
+	"daemonsets":                {"/apis/apps/v1", "daemonsets", true},
+	"statefulsets":              {"/apis/apps/v1", "statefulsets", true},
+	"replicasets":               {"/apis/apps/v1", "replicasets", true},
+	"jobs":                      {"/apis/batch/v1", "jobs", true},
+	"cronjobs":                  {"/apis/batch/v1", "cronjobs", true},
+	"ingresses":                 {"/apis/networking.k8s.io/v1", "ingresses", true},
+	"ingressclasses":            {"/apis/networking.k8s.io/v1", "ingressclasses", false},
+	"networkpolicies":           {"/apis/networking.k8s.io/v1", "networkpolicies", true},
+	"storageclasses":            {"/apis/storage.k8s.io/v1", "storageclasses", false},
+	"clusterroles":              {"/apis/rbac.authorization.k8s.io/v1", "clusterroles", false},
+	"clusterrolebindings":       {"/apis/rbac.authorization.k8s.io/v1", "clusterrolebindings", false},
+	"roles":                     {"/apis/rbac.authorization.k8s.io/v1", "roles", true},
+	"rolebindings":              {"/apis/rbac.authorization.k8s.io/v1", "rolebindings", true},
+	"customresourcedefinitions": {"/apis/apiextensions.k8s.io/v1", "customresourcedefinitions", false},
+}
+
+// resourceAliases maps short/singular forms to the canonical plural key in resourceMap.
+var resourceAliases = map[string]string{
+	"pod": "pods", "deployment": "deployments", "daemonset": "daemonsets",
+	"statefulset": "statefulsets", "replicaset": "replicasets", "job": "jobs",
+	"cronjob": "cronjobs", "service": "services", "svc": "services",
+	"ingress": "ingresses", "ingressclass": "ingressclasses",
+	"configmap": "configmaps", "secret": "secrets", "pvc": "persistentvolumeclaims",
+	"storageclass": "storageclasses", "crd": "customresourcedefinitions",
+	"crds": "customresourcedefinitions", "node": "nodes", "namespace": "namespaces",
+	"pv": "persistentvolumes", "persistentvolume": "persistentvolumes",
+	"clusterrole": "clusterroles", "clusterrolebinding": "clusterrolebindings",
+	"role": "roles", "rolebinding": "rolebindings",
+	"serviceaccount": "serviceaccounts", "sa": "serviceaccounts",
+	"networkpolicy": "networkpolicies", "event": "events",
+}
+
+func resolveResource(name string) (resourceInfo, error) {
+	if info, ok := resourceMap[name]; ok {
+		return info, nil
+	}
+	if canonical, ok := resourceAliases[name]; ok {
+		return resourceMap[canonical], nil
+	}
+	return resourceInfo{}, fmt.Errorf("unknown resource type: %s", name)
+}
+
+func (d *Datasource) runYAMLQuery(ctx context.Context, pCtx backend.PluginContext, qm queryModel) (*data.Frame, error) {
+	var jdata jsonData
+	if err := json.Unmarshal(pCtx.DataSourceInstanceSettings.JSONData, &jdata); err != nil {
+		return nil, err
+	}
+	secrets := pCtx.DataSourceInstanceSettings.DecryptedSecureJSONData
+	kubeConfig, err := buildKubeConfig(ctx, jdata, secrets)
+	if err != nil {
+		return nil, err
+	}
+	clientset, err := kubernetes.NewForConfig(kubeConfig)
+	if err != nil {
+		return nil, err
+	}
+
+	if qm.Name == "" {
+		return nil, fmt.Errorf("name is required for yaml action")
+	}
+
+	namespace := qm.Namespace
+	if namespace == "_all" {
+		namespace = ""
+	}
+
+	var path string
+	info, err := resolveResource(qm.Resource)
+	if err == nil {
+		if info.namespaced && namespace != "" {
+			path = info.apiPath + "/namespaces/" + namespace + "/" + info.resource + "/" + qm.Name
+		} else {
+			path = info.apiPath + "/" + info.resource + "/" + qm.Name
+		}
+	} else {
+		// Fallback: discover as custom resource
+		gvr, discErr := discoverCR(clientset.Discovery(), qm.Resource)
+		if discErr != nil {
+			return nil, fmt.Errorf("unknown resource type: %s (%v)", qm.Resource, discErr)
+		}
+		apiPath := "/apis/" + gvr.Group + "/" + gvr.Version
+		if namespace != "" {
+			path = apiPath + "/namespaces/" + namespace + "/" + gvr.Resource + "/" + qm.Name
+		} else {
+			path = apiPath + "/" + gvr.Resource + "/" + qm.Name
+		}
+	}
+
+	restResult := clientset.RESTClient().Get().AbsPath(path).Do(ctx)
+	if err := restResult.Error(); err != nil {
+		return nil, err
+	}
+	rawBytes, err := restResult.Raw()
+	if err != nil {
+		return nil, err
+	}
+
+	// Convert JSON to YAML
+	var obj interface{}
+	if err := json.Unmarshal(rawBytes, &obj); err != nil {
+		return nil, fmt.Errorf("parsing response: %w", err)
+	}
+	yamlBytes, err := yaml.Marshal(obj)
+	if err != nil {
+		return nil, fmt.Errorf("converting to YAML: %w", err)
+	}
+
+	frame := data.NewFrame("yaml",
+		data.NewField("yaml", nil, []string{string(yamlBytes)}),
+	)
+	return frame, nil
 }
 
 func labelsToString(m map[string]string) string {
@@ -641,28 +869,7 @@ func getPodDetail(ctx context.Context, clientset *kubernetes.Clientset, namespac
 		st := statusMap[c.Name]
 
 		// env
-		type envEntry struct {
-			Name  string `json:"name"`
-			Value string `json:"value"`
-		}
-		envEntries := make([]envEntry, 0, len(c.Env))
-		for _, e := range c.Env {
-			val := e.Value
-			if e.ValueFrom != nil {
-				switch {
-				case e.ValueFrom.ConfigMapKeyRef != nil:
-					val = "configmap:" + e.ValueFrom.ConfigMapKeyRef.Name + "/" + e.ValueFrom.ConfigMapKeyRef.Key
-				case e.ValueFrom.SecretKeyRef != nil:
-					val = "secret:" + e.ValueFrom.SecretKeyRef.Name + "/" + e.ValueFrom.SecretKeyRef.Key
-				case e.ValueFrom.FieldRef != nil:
-					val = "fieldRef:" + e.ValueFrom.FieldRef.FieldPath
-				case e.ValueFrom.ResourceFieldRef != nil:
-					val = "resourceFieldRef:" + e.ValueFrom.ResourceFieldRef.Resource
-				}
-			}
-			envEntries = append(envEntries, envEntry{Name: e.Name, Value: val})
-		}
-		envJSON, _ := json.Marshal(envEntries)
+		envJSON := buildContainerEnvJSON(ctx, clientset, namespace, c)
 
 		// mounts
 		type mountEntry struct {
@@ -836,28 +1043,7 @@ func getDeploymentDetail(ctx context.Context, clientset *kubernetes.Clientset, n
 	)
 	setDetailMeta(containersFrame)
 	for _, c := range dep.Spec.Template.Spec.Containers {
-		type envEntry struct {
-			Name  string `json:"name"`
-			Value string `json:"value"`
-		}
-		envEntries := make([]envEntry, 0, len(c.Env))
-		for _, e := range c.Env {
-			val := e.Value
-			if e.ValueFrom != nil {
-				switch {
-				case e.ValueFrom.ConfigMapKeyRef != nil:
-					val = "configmap:" + e.ValueFrom.ConfigMapKeyRef.Name + "/" + e.ValueFrom.ConfigMapKeyRef.Key
-				case e.ValueFrom.SecretKeyRef != nil:
-					val = "secret:" + e.ValueFrom.SecretKeyRef.Name + "/" + e.ValueFrom.SecretKeyRef.Key
-				case e.ValueFrom.FieldRef != nil:
-					val = "fieldRef:" + e.ValueFrom.FieldRef.FieldPath
-				case e.ValueFrom.ResourceFieldRef != nil:
-					val = "resourceFieldRef:" + e.ValueFrom.ResourceFieldRef.Resource
-				}
-			}
-			envEntries = append(envEntries, envEntry{Name: e.Name, Value: val})
-		}
-		envJSON, _ := json.Marshal(envEntries)
+		envJSON := buildContainerEnvJSON(ctx, clientset, namespace, c)
 		limits := make(map[string]string)
 		for k, v := range c.Resources.Limits {
 			limits[string(k)] = v.String()
@@ -945,7 +1131,10 @@ func getDeploymentDetail(ctx context.Context, clientset *kubernetes.Clientset, n
 		}
 	}
 
-	return data.Frames{metaFrame, condFrame, evtFrame, containersFrame, rsFrame, hpaFrame}, nil
+	podsFrame, _ := buildPodsSubFrame(ctx, clientset, namespace, dep.Spec.Selector.MatchLabels)
+	svcsFrame, _ := buildServicesSubFrame(ctx, clientset, namespace, dep.Spec.Template.Labels)
+
+	return data.Frames{metaFrame, condFrame, evtFrame, containersFrame, rsFrame, hpaFrame, podsFrame, svcsFrame}, nil
 }
 
 func getDaemonSetDetail(ctx context.Context, clientset *kubernetes.Clientset, namespace, name string) (data.Frames, error) {
@@ -1012,7 +1201,7 @@ func getDaemonSetDetail(ctx context.Context, clientset *kubernetes.Clientset, na
 	}
 
 	evtFrame := buildEventsFrame(ctx, clientset, namespace, name)
-	containersFrame := buildSpecContainersFrame(ds.Spec.Template.Spec.Containers)
+	containersFrame := buildSpecContainersFrame(ctx, clientset, namespace, ds.Spec.Template.Spec.Containers)
 	podsFrame, _ := buildPodsSubFrame(ctx, clientset, namespace, ds.Spec.Selector.MatchLabels)
 	svcsFrame, _ := buildServicesSubFrame(ctx, clientset, namespace, ds.Spec.Template.Labels)
 
@@ -1085,7 +1274,7 @@ func getStatefulSetDetail(ctx context.Context, clientset *kubernetes.Clientset, 
 	}
 
 	evtFrame := buildEventsFrame(ctx, clientset, namespace, name)
-	containersFrame := buildSpecContainersFrame(ss.Spec.Template.Spec.Containers)
+	containersFrame := buildSpecContainersFrame(ctx, clientset, namespace, ss.Spec.Template.Spec.Containers)
 	podsFrame, _ := buildPodsSubFrame(ctx, clientset, namespace, ss.Spec.Selector.MatchLabels)
 
 	return data.Frames{metaFrame, condFrame, evtFrame, containersFrame, podsFrame}, nil
@@ -1159,7 +1348,7 @@ func getReplicaSetDetail(ctx context.Context, clientset *kubernetes.Clientset, n
 	}
 
 	evtFrame := buildEventsFrame(ctx, clientset, namespace, name)
-	containersFrame := buildSpecContainersFrame(rs.Spec.Template.Spec.Containers)
+	containersFrame := buildSpecContainersFrame(ctx, clientset, namespace, rs.Spec.Template.Spec.Containers)
 	podsFrame, _ := buildPodsSubFrame(ctx, clientset, namespace, rs.Spec.Selector.MatchLabels)
 	svcsFrame, _ := buildServicesSubFrame(ctx, clientset, namespace, rs.Spec.Template.Labels)
 
@@ -1245,7 +1434,7 @@ func getJobDetail(ctx context.Context, clientset *kubernetes.Clientset, namespac
 	}
 
 	evtFrame := buildEventsFrame(ctx, clientset, namespace, name)
-	containersFrame := buildSpecContainersFrame(job.Spec.Template.Spec.Containers)
+	containersFrame := buildSpecContainersFrame(ctx, clientset, namespace, job.Spec.Template.Spec.Containers)
 	var podMatchLabels map[string]string
 	if job.Spec.Selector != nil {
 		podMatchLabels = job.Spec.Selector.MatchLabels
@@ -1425,7 +1614,52 @@ func buildEventsFrame(ctx context.Context, clientset *kubernetes.Clientset, name
 	return f
 }
 
-func buildSpecContainersFrame(containers []corev1.Container) *data.Frame {
+type envEntry struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+}
+
+func buildContainerEnvJSON(ctx context.Context, clientset *kubernetes.Clientset, namespace string, c corev1.Container) json.RawMessage {
+	entries := make([]envEntry, 0, len(c.Env))
+	for _, e := range c.Env {
+		val := e.Value
+		if e.ValueFrom != nil {
+			switch {
+			case e.ValueFrom.ConfigMapKeyRef != nil:
+				val = "configmap:" + e.ValueFrom.ConfigMapKeyRef.Name + "/" + e.ValueFrom.ConfigMapKeyRef.Key
+			case e.ValueFrom.SecretKeyRef != nil:
+				val = "secret:" + e.ValueFrom.SecretKeyRef.Name + "/" + e.ValueFrom.SecretKeyRef.Key
+			case e.ValueFrom.FieldRef != nil:
+				val = "fieldRef:" + e.ValueFrom.FieldRef.FieldPath
+			case e.ValueFrom.ResourceFieldRef != nil:
+				val = "resourceFieldRef:" + e.ValueFrom.ResourceFieldRef.Resource
+			}
+		}
+		entries = append(entries, envEntry{Name: e.Name, Value: val})
+	}
+	for _, ef := range c.EnvFrom {
+		prefix := ef.Prefix
+		if ef.ConfigMapRef != nil {
+			cm, err := clientset.CoreV1().ConfigMaps(namespace).Get(ctx, ef.ConfigMapRef.Name, metav1.GetOptions{})
+			if err == nil {
+				for k, v := range cm.Data {
+					entries = append(entries, envEntry{Name: prefix + k, Value: v})
+				}
+			}
+		} else if ef.SecretRef != nil {
+			secret, err := clientset.CoreV1().Secrets(namespace).Get(ctx, ef.SecretRef.Name, metav1.GetOptions{})
+			if err == nil {
+				for k := range secret.Data {
+					entries = append(entries, envEntry{Name: prefix + k, Value: "***"})
+				}
+			}
+		}
+	}
+	b, _ := json.Marshal(entries)
+	return json.RawMessage(b)
+}
+
+func buildSpecContainersFrame(ctx context.Context, clientset *kubernetes.Clientset, namespace string, containers []corev1.Container) *data.Frame {
 	f := data.NewFrame("containers",
 		data.NewField("Name", nil, []string{}),
 		data.NewField("Image", nil, []string{}),
@@ -1437,28 +1671,7 @@ func buildSpecContainersFrame(containers []corev1.Container) *data.Frame {
 	)
 	setDetailMeta(f)
 	for _, c := range containers {
-		type envEntry struct {
-			Name  string `json:"name"`
-			Value string `json:"value"`
-		}
-		envEntries := make([]envEntry, 0, len(c.Env))
-		for _, e := range c.Env {
-			val := e.Value
-			if e.ValueFrom != nil {
-				switch {
-				case e.ValueFrom.ConfigMapKeyRef != nil:
-					val = "configmap:" + e.ValueFrom.ConfigMapKeyRef.Name + "/" + e.ValueFrom.ConfigMapKeyRef.Key
-				case e.ValueFrom.SecretKeyRef != nil:
-					val = "secret:" + e.ValueFrom.SecretKeyRef.Name + "/" + e.ValueFrom.SecretKeyRef.Key
-				case e.ValueFrom.FieldRef != nil:
-					val = "fieldRef:" + e.ValueFrom.FieldRef.FieldPath
-				case e.ValueFrom.ResourceFieldRef != nil:
-					val = "resourceFieldRef:" + e.ValueFrom.ResourceFieldRef.Resource
-				}
-			}
-			envEntries = append(envEntries, envEntry{Name: e.Name, Value: val})
-		}
-		envJSON, _ := json.Marshal(envEntries)
+		envJSON := buildContainerEnvJSON(ctx, clientset, namespace, c)
 		limits := make(map[string]string)
 		for k, v := range c.Resources.Limits {
 			limits[string(k)] = v.String()
@@ -1834,35 +2047,6 @@ func getIngressClassDetail(ctx context.Context, clientset *kubernetes.Clientset,
 	)
 
 	return data.Frames{metaFrame}, nil
-}
-
-func getNodeDetail(ctx context.Context, clientset *kubernetes.Clientset, name string) (*data.Frame, error) {
-	node, err := clientset.CoreV1().Nodes().Get(ctx, name, metav1.GetOptions{})
-	if err != nil {
-		return nil, err
-	}
-
-	frame := newDetailFrame()
-	frame.AppendRow("Name", node.Name)
-	frame.AppendRow("Kubelet Version", node.Status.NodeInfo.KubeletVersion)
-	frame.AppendRow("OS", node.Status.NodeInfo.OSImage)
-	frame.AppendRow("Kernel", node.Status.NodeInfo.KernelVersion)
-	frame.AppendRow("Container Runtime", node.Status.NodeInfo.ContainerRuntimeVersion)
-	frame.AppendRow("Architecture", node.Status.NodeInfo.Architecture)
-	frame.AppendRow("Labels", labelsToString(node.Labels))
-	frame.AppendRow("Created", node.CreationTimestamp.String())
-
-	for _, cond := range node.Status.Conditions {
-		frame.AppendRow("Condition: "+string(cond.Type), string(cond.Status))
-	}
-	if cpu, ok := node.Status.Capacity["cpu"]; ok {
-		frame.AppendRow("CPU Capacity", cpu.String())
-	}
-	if mem, ok := node.Status.Capacity["memory"]; ok {
-		frame.AppendRow("Memory Capacity", mem.String())
-	}
-
-	return frame, nil
 }
 
 func getDeployments(ctx context.Context, clientset *kubernetes.Clientset, namespace string, listOpts metav1.ListOptions) (*data.Frame, error) {
@@ -2446,10 +2630,14 @@ func getStorageClasses(ctx context.Context, clientset *kubernetes.Clientset, lis
 }
 
 func getCRDs(ctx context.Context, clientset *kubernetes.Clientset, listOpts metav1.ListOptions) (*data.Frame, error) {
-	rawBytes, err := clientset.RESTClient().Get().
+	restResult := clientset.RESTClient().Get().
 		AbsPath("/apis/apiextensions.k8s.io/v1/customresourcedefinitions").
 		Param("labelSelector", listOpts.LabelSelector).
-		DoRaw(ctx)
+		Do(ctx)
+	if err := restResult.Error(); err != nil {
+		return nil, err
+	}
+	rawBytes, err := restResult.Raw()
 	if err != nil {
 		return nil, err
 	}
@@ -2623,10 +2811,56 @@ func getNodes(ctx context.Context, clientset *kubernetes.Clientset, listOpts met
 		return nil, err
 	}
 
+	// Fetch all pods to compute per-node resource requests/limits and pod counts
+	podList, err := clientset.CoreV1().Pods("").List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, err
+	}
+
+	type nodeResources struct {
+		cpuRequests    int64
+		cpuLimits      int64
+		memoryRequests int64
+		memoryLimits   int64
+		podCount       int
+	}
+	nodeResourceMap := make(map[string]*nodeResources)
+	for i := range podList.Items {
+		pod := &podList.Items[i]
+		if pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
+			continue
+		}
+		nr, ok := nodeResourceMap[pod.Spec.NodeName]
+		if !ok {
+			nr = &nodeResources{}
+			nodeResourceMap[pod.Spec.NodeName] = nr
+		}
+		nr.podCount++
+		for _, c := range pod.Spec.Containers {
+			if req, ok := c.Resources.Requests[corev1.ResourceCPU]; ok {
+				nr.cpuRequests += req.MilliValue()
+			}
+			if lim, ok := c.Resources.Limits[corev1.ResourceCPU]; ok {
+				nr.cpuLimits += lim.MilliValue()
+			}
+			if req, ok := c.Resources.Requests[corev1.ResourceMemory]; ok {
+				nr.memoryRequests += req.Value()
+			}
+			if lim, ok := c.Resources.Limits[corev1.ResourceMemory]; ok {
+				nr.memoryLimits += lim.Value()
+			}
+		}
+	}
+
 	frame := data.NewFrame("Workloads",
 		data.NewField("Name", nil, []string{}),
 		data.NewField("Status", nil, []string{}),
 		data.NewField("Roles", nil, []string{}),
+		data.NewField("Pods", nil, []string{}),
+		data.NewField("CPU Requests", nil, []string{}),
+		data.NewField("CPU Limits", nil, []string{}),
+		data.NewField("Memory Requests", nil, []string{}),
+		data.NewField("Memory Limits", nil, []string{}),
 		data.NewField("Version", nil, []string{}),
 		data.NewField("OS", nil, []string{}),
 		data.NewField("Labels", nil, []json.RawMessage{}),
@@ -2655,7 +2889,36 @@ func getNodes(ctx context.Context, clientset *kubernetes.Clientset, listOpts met
 		if err != nil {
 			return nil, err
 		}
-		frame.AppendRow(node.Name, status, strings.Join(roles, ","), node.Status.NodeInfo.KubeletVersion, node.Status.NodeInfo.OSImage, json.RawMessage(labels), node.CreationTimestamp.Time)
+
+		nr := nodeResourceMap[node.Name]
+		if nr == nil {
+			nr = &nodeResources{}
+		}
+
+		allocPods := int64(110) // default
+		if ap, ok := node.Status.Allocatable[corev1.ResourcePods]; ok {
+			allocPods = ap.Value()
+		}
+
+		cpuCap := int64(0)
+		if c, ok := node.Status.Allocatable[corev1.ResourceCPU]; ok {
+			cpuCap = c.MilliValue()
+		}
+		memCap := int64(0)
+		if m, ok := node.Status.Allocatable[corev1.ResourceMemory]; ok {
+			memCap = m.Value()
+		}
+
+		podStr := fmt.Sprintf("%d/%d", nr.podCount, allocPods)
+		cpuReqStr := fmt.Sprintf("%dm/%dm", nr.cpuRequests, cpuCap)
+		cpuLimStr := fmt.Sprintf("%dm/%dm", nr.cpuLimits, cpuCap)
+		memReqStr := fmt.Sprintf("%dMi/%dMi", nr.memoryRequests/(1024*1024), memCap/(1024*1024))
+		memLimStr := fmt.Sprintf("%dMi/%dMi", nr.memoryLimits/(1024*1024), memCap/(1024*1024))
+
+		frame.AppendRow(node.Name, status, strings.Join(roles, ","),
+			podStr, cpuReqStr, cpuLimStr, memReqStr, memLimStr,
+			node.Status.NodeInfo.KubeletVersion, node.Status.NodeInfo.OSImage,
+			json.RawMessage(labels), node.CreationTimestamp.Time)
 	}
 
 	return frame, nil
@@ -3065,7 +3328,6 @@ func getNodeDetailRich(ctx context.Context, clientset *kubernetes.Clientset, nam
 		data.NewField("OS Image", nil, []string{}),
 		data.NewField("Container Runtime", nil, []string{}),
 		data.NewField("Kubelet Version", nil, []string{}),
-		data.NewField("Kube Proxy Version", nil, []string{}),
 		data.NewField("OS", nil, []string{}),
 		data.NewField("Architecture", nil, []string{}),
 	)
@@ -3078,7 +3340,6 @@ func getNodeDetailRich(ctx context.Context, clientset *kubernetes.Clientset, nam
 		node.Status.NodeInfo.OSImage,
 		node.Status.NodeInfo.ContainerRuntimeVersion,
 		node.Status.NodeInfo.KubeletVersion,
-		node.Status.NodeInfo.KubeProxyVersion,
 		node.Status.NodeInfo.OperatingSystem,
 		node.Status.NodeInfo.Architecture,
 	)
@@ -3105,7 +3366,80 @@ func getNodeDetailRich(ctx context.Context, clientset *kubernetes.Clientset, nam
 		condFrame.AppendRow(string(c.Type), string(c.Status), lastProbe, lastTransition, c.Reason, c.Message)
 	}
 
-	return data.Frames{metaFrame, sysFrame, condFrame}, nil
+	podList, err := clientset.CoreV1().Pods("").List(ctx, metav1.ListOptions{
+		FieldSelector: "spec.nodeName=" + name,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	podsFrame := data.NewFrame("pods",
+		data.NewField("Name", nil, []string{}),
+		data.NewField("Namespace", nil, []string{}),
+		data.NewField("Status", nil, []string{}),
+		data.NewField("IP", nil, []string{}),
+		data.NewField("Created", nil, []time.Time{}),
+	)
+	setDetailMeta(podsFrame)
+	var activePodCount int
+	var totalCPURequests, totalCPULimits, totalMemRequests, totalMemLimits int64
+	for _, p := range podList.Items {
+		podsFrame.AppendRow(p.Name, p.Namespace, string(p.Status.Phase), p.Status.PodIP, p.CreationTimestamp.Time)
+		if p.Status.Phase != corev1.PodSucceeded && p.Status.Phase != corev1.PodFailed {
+			activePodCount++
+			for _, c := range p.Spec.Containers {
+				if req, ok := c.Resources.Requests[corev1.ResourceCPU]; ok {
+					totalCPURequests += req.MilliValue()
+				}
+				if lim, ok := c.Resources.Limits[corev1.ResourceCPU]; ok {
+					totalCPULimits += lim.MilliValue()
+				}
+				if req, ok := c.Resources.Requests[corev1.ResourceMemory]; ok {
+					totalMemRequests += req.Value()
+				}
+				if lim, ok := c.Resources.Limits[corev1.ResourceMemory]; ok {
+					totalMemLimits += lim.Value()
+				}
+			}
+		}
+	}
+
+	resourcesFrame := data.NewFrame("resources",
+		data.NewField("Resource", nil, []string{}),
+		data.NewField("Requests", nil, []string{}),
+		data.NewField("Limits", nil, []string{}),
+		data.NewField("Capacity", nil, []string{}),
+		data.NewField("Allocatable", nil, []string{}),
+	)
+	setDetailMeta(resourcesFrame)
+
+	cpuCap, cpuAlloc := "", ""
+	if c, ok := node.Status.Capacity[corev1.ResourceCPU]; ok {
+		cpuCap = c.String()
+	}
+	if c, ok := node.Status.Allocatable[corev1.ResourceCPU]; ok {
+		cpuAlloc = c.String()
+	}
+	memCap, memAlloc := "", ""
+	if m, ok := node.Status.Capacity[corev1.ResourceMemory]; ok {
+		memCap = m.String()
+	}
+	if m, ok := node.Status.Allocatable[corev1.ResourceMemory]; ok {
+		memAlloc = m.String()
+	}
+	podCap, podAlloc := "", ""
+	if p, ok := node.Status.Capacity[corev1.ResourcePods]; ok {
+		podCap = p.String()
+	}
+	if p, ok := node.Status.Allocatable[corev1.ResourcePods]; ok {
+		podAlloc = p.String()
+	}
+
+	resourcesFrame.AppendRow("CPU", fmt.Sprintf("%dm", totalCPURequests), fmt.Sprintf("%dm", totalCPULimits), cpuCap, cpuAlloc)
+	resourcesFrame.AppendRow("Memory", fmt.Sprintf("%dMi", totalMemRequests/(1024*1024)), fmt.Sprintf("%dMi", totalMemLimits/(1024*1024)), memCap, memAlloc)
+	resourcesFrame.AppendRow("Pods", fmt.Sprintf("%d", activePodCount), "", podCap, podAlloc)
+
+	return data.Frames{metaFrame, sysFrame, condFrame, resourcesFrame, podsFrame}, nil
 }
 
 func getClusterRoleBindingDetail(ctx context.Context, clientset *kubernetes.Clientset, name string) (data.Frames, error) {
@@ -3467,9 +3801,13 @@ func getServiceAccountDetail(ctx context.Context, clientset *kubernetes.Clientse
 }
 
 func getCRDDetail(ctx context.Context, clientset *kubernetes.Clientset, name string) (data.Frames, error) {
-	rawBytes, err := clientset.RESTClient().Get().
+	restResult := clientset.RESTClient().Get().
 		AbsPath("/apis/apiextensions.k8s.io/v1/customresourcedefinitions/" + name).
-		DoRaw(ctx)
+		Do(ctx)
+	if err := restResult.Error(); err != nil {
+		return nil, err
+	}
+	rawBytes, err := restResult.Raw()
 	if err != nil {
 		return nil, err
 	}
@@ -3605,4 +3943,178 @@ func getCRDDetail(ctx context.Context, clientset *kubernetes.Clientset, name str
 	}
 
 	return data.Frames{metaFrame, namesFrame, versionsFrame, conditionsFrame}, nil
+}
+
+// discoverCR uses API discovery to find the GVR for a resource name (plural).
+// It iterates over all API groups/versions looking for a matching resource.
+// deprecatedGroups maps deprecated API groups to their preferred replacements.
+// When multiple groups serve the same resource, the non-deprecated group wins.
+var deprecatedGroups = map[string]bool{
+	"traefik.containo.us": true,
+}
+
+func discoverCR(disc discovery.DiscoveryInterface, resourceName string) (schema.GroupVersionResource, error) {
+	_, apiResourceLists, err := disc.ServerGroupsAndResources()
+	if err != nil {
+		// Discovery can return partial results with an error; try to use what we got
+		if apiResourceLists == nil {
+			return schema.GroupVersionResource{}, fmt.Errorf("API discovery failed: %v", err)
+		}
+	}
+
+	var matches []schema.GroupVersionResource
+	for _, list := range apiResourceLists {
+		gv, parseErr := schema.ParseGroupVersion(list.GroupVersion)
+		if parseErr != nil {
+			continue
+		}
+		for _, r := range list.APIResources {
+			if r.Name == resourceName {
+				matches = append(matches, schema.GroupVersionResource{
+					Group:    gv.Group,
+					Version:  gv.Version,
+					Resource: r.Name,
+				})
+			}
+		}
+	}
+
+	if len(matches) == 0 {
+		return schema.GroupVersionResource{}, fmt.Errorf("resource %q not found via API discovery", resourceName)
+	}
+
+	// Prefer non-deprecated groups
+	for _, m := range matches {
+		if !deprecatedGroups[m.Group] {
+			return m, nil
+		}
+	}
+	return matches[0], nil
+}
+
+func listCustomResources(ctx context.Context, dynClient dynamic.Interface, gvr schema.GroupVersionResource, namespace string, listOpts metav1.ListOptions) (*data.Frame, error) {
+	var rc dynamic.ResourceInterface
+	if namespace == "" {
+		rc = dynClient.Resource(gvr)
+	} else {
+		rc = dynClient.Resource(gvr).Namespace(namespace)
+	}
+	result, err := rc.List(ctx, listOpts)
+	if err != nil {
+		return nil, err
+	}
+
+	frame := data.NewFrame("Workloads",
+		data.NewField("Name", nil, []string{}),
+		data.NewField("Namespace", nil, []string{}),
+		data.NewField("Status", nil, []string{}),
+		data.NewField("Labels", nil, []json.RawMessage{}),
+		data.NewField("Created", nil, []time.Time{}),
+	)
+
+	for _, item := range result.Items {
+		status := ""
+		if statusObj, ok := item.Object["status"].(map[string]interface{}); ok {
+			if phase, ok := statusObj["phase"].(string); ok {
+				status = phase
+			} else if conditions, ok := statusObj["conditions"].([]interface{}); ok && len(conditions) > 0 {
+				if last, ok := conditions[len(conditions)-1].(map[string]interface{}); ok {
+					if t, _ := last["type"].(string); t != "" {
+						s, _ := last["status"].(string)
+						status = t + "=" + s
+					}
+				}
+			}
+		}
+
+		labelsJSON, _ := json.Marshal(item.GetLabels())
+		frame.AppendRow(item.GetName(), item.GetNamespace(), status, json.RawMessage(labelsJSON), item.GetCreationTimestamp().Time)
+	}
+
+	return frame, nil
+}
+
+func getCustomResourceDetail(ctx context.Context, dynClient dynamic.Interface, gvr schema.GroupVersionResource, namespace, name string) (data.Frames, error) {
+	var rc dynamic.ResourceInterface
+	if namespace == "" {
+		rc = dynClient.Resource(gvr)
+	} else {
+		rc = dynClient.Resource(gvr).Namespace(namespace)
+	}
+	result, err := rc.Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return nil, err
+	}
+	raw := result.Object
+
+	metadata := raw["metadata"].(map[string]interface{})
+	nameStr, _ := metadata["name"].(string)
+	uid, _ := metadata["uid"].(string)
+	ns, _ := metadata["namespace"].(string)
+	kind, _ := raw["kind"].(string)
+
+	var created time.Time
+	if ts, ok := metadata["creationTimestamp"].(string); ok {
+		created, _ = time.Parse(time.RFC3339, ts)
+	}
+
+	labels := map[string]interface{}{}
+	if l, ok := metadata["labels"].(map[string]interface{}); ok {
+		labels = l
+	}
+	annotations := map[string]interface{}{}
+	if a, ok := metadata["annotations"].(map[string]interface{}); ok {
+		annotations = a
+	}
+	labelsJSON, _ := json.Marshal(labels)
+	annotationsJSON, _ := json.Marshal(annotations)
+
+	ownerKind, ownerName := "", ""
+	if owners, ok := metadata["ownerReferences"].([]interface{}); ok && len(owners) > 0 {
+		if owner, ok := owners[0].(map[string]interface{}); ok {
+			ownerKind, _ = owner["kind"].(string)
+			ownerName, _ = owner["name"].(string)
+		}
+	}
+
+	metaFrame := data.NewFrame("meta",
+		data.NewField("Name", nil, []string{}),
+		data.NewField("UID", nil, []string{}),
+		data.NewField("Namespace", nil, []string{}),
+		data.NewField("Created", nil, []time.Time{}),
+		data.NewField("Owner Kind", nil, []string{}),
+		data.NewField("Owner Name", nil, []string{}),
+		data.NewField("Labels", nil, []json.RawMessage{}),
+		data.NewField("Annotations", nil, []json.RawMessage{}),
+		data.NewField("Kind", nil, []string{}),
+	)
+	setDetailMeta(metaFrame)
+	metaFrame.AppendRow(nameStr, uid, ns, created, ownerKind, ownerName,
+		json.RawMessage(labelsJSON), json.RawMessage(annotationsJSON), kind)
+
+	specFrame := data.NewFrame("spec",
+		data.NewField("Key", nil, []string{}),
+		data.NewField("Value", nil, []string{}),
+	)
+	setDetailMeta(specFrame)
+	if spec, ok := raw["spec"].(map[string]interface{}); ok {
+		for k, v := range spec {
+			val, _ := json.Marshal(v)
+			specFrame.AppendRow(k, string(val))
+		}
+	}
+
+	statusFrame := data.NewFrame("status",
+		data.NewField("Key", nil, []string{}),
+		data.NewField("Value", nil, []string{}),
+	)
+	setDetailMeta(statusFrame)
+	if status, ok := raw["status"].(map[string]interface{}); ok {
+		for k, v := range status {
+			val, _ := json.Marshal(v)
+			statusFrame.AppendRow(k, string(val))
+		}
+	}
+
+	return data.Frames{metaFrame, specFrame, statusFrame}, nil
 }
