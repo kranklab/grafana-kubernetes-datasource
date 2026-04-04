@@ -11,6 +11,6 @@ test('should trigger new query when Resource field is changed', async ({
   const resourceInput = panelEditPage.getQueryEditorRow('A').getByRole('combobox').nth(1);
   await resourceInput.click();
   await resourceInput.fill('Services');
-  await page.getByRole('option', { name: 'Services' }).click();
+  await page.getByRole('option', { name: 'Services', exact: true }).click();
   await expect(await queryReq).toBeTruthy();
 });
