@@ -2062,6 +2062,7 @@ func getDeployments(ctx context.Context, clientset *kubernetes.Clientset, namesp
 		data.NewField("Status", nil, []string{}),
 		data.NewField("Images", nil, []json.RawMessage{}),
 		data.NewField("Labels", nil, []json.RawMessage{}),
+		data.NewField("Annotations", nil, []json.RawMessage{}),
 		data.NewField("Target", nil, []int32{}),
 		data.NewField("Available", nil, []int32{}),
 		data.NewField("Created", nil, []time.Time{}),
@@ -2080,7 +2081,11 @@ func getDeployments(ctx context.Context, clientset *kubernetes.Clientset, namesp
 		if err != nil {
 			return nil, err
 		}
-		frame.AppendRow(pod.Name, pod.Namespace, "ok", json.RawMessage(jsonImages), json.RawMessage(labels), pod.Status.Replicas, pod.Status.AvailableReplicas, pod.CreationTimestamp.Time)
+		annotations, err := json.Marshal(pod.ObjectMeta.Annotations)
+		if err != nil {
+			return nil, err
+		}
+		frame.AppendRow(pod.Name, pod.Namespace, "ok", json.RawMessage(jsonImages), json.RawMessage(labels), json.RawMessage(annotations), pod.Status.Replicas, pod.Status.AvailableReplicas, pod.CreationTimestamp.Time)
 	}
 
 	return frame, nil
@@ -2100,6 +2105,7 @@ func getDeamonSets(ctx context.Context, clientset *kubernetes.Clientset, namespa
 		data.NewField("Status", nil, []string{}),
 		data.NewField("Images", nil, []json.RawMessage{}),
 		data.NewField("Labels", nil, []json.RawMessage{}),
+		data.NewField("Annotations", nil, []json.RawMessage{}),
 		data.NewField("Target", nil, []int32{}),
 		data.NewField("Available", nil, []int32{}),
 		data.NewField("Created", nil, []time.Time{}),
@@ -2118,7 +2124,11 @@ func getDeamonSets(ctx context.Context, clientset *kubernetes.Clientset, namespa
 		if err != nil {
 			return nil, err
 		}
-		frame.AppendRow(pod.Name, pod.Namespace, "ok", json.RawMessage(jsonImages), json.RawMessage(labels), pod.Status.DesiredNumberScheduled, pod.Status.CurrentNumberScheduled, pod.CreationTimestamp.Time)
+		annotations, err := json.Marshal(pod.ObjectMeta.Annotations)
+		if err != nil {
+			return nil, err
+		}
+		frame.AppendRow(pod.Name, pod.Namespace, "ok", json.RawMessage(jsonImages), json.RawMessage(labels), json.RawMessage(annotations), pod.Status.DesiredNumberScheduled, pod.Status.CurrentNumberScheduled, pod.CreationTimestamp.Time)
 	}
 
 	return frame, nil
@@ -2138,6 +2148,7 @@ func getStatefulSets(ctx context.Context, clientset *kubernetes.Clientset, names
 		data.NewField("Status", nil, []string{}),
 		data.NewField("Images", nil, []json.RawMessage{}),
 		data.NewField("Labels", nil, []json.RawMessage{}),
+		data.NewField("Annotations", nil, []json.RawMessage{}),
 		data.NewField("Target", nil, []int32{}),
 		data.NewField("Available", nil, []int32{}),
 		data.NewField("Created", nil, []time.Time{}),
@@ -2156,7 +2167,11 @@ func getStatefulSets(ctx context.Context, clientset *kubernetes.Clientset, names
 		if err != nil {
 			return nil, err
 		}
-		frame.AppendRow(pod.Name, pod.Namespace, "ok", json.RawMessage(jsonImages), json.RawMessage(labels), pod.Status.Replicas, pod.Status.AvailableReplicas, pod.CreationTimestamp.Time)
+		annotations, err := json.Marshal(pod.ObjectMeta.Annotations)
+		if err != nil {
+			return nil, err
+		}
+		frame.AppendRow(pod.Name, pod.Namespace, "ok", json.RawMessage(jsonImages), json.RawMessage(labels), json.RawMessage(annotations), pod.Status.Replicas, pod.Status.AvailableReplicas, pod.CreationTimestamp.Time)
 	}
 
 	return frame, nil
@@ -2176,6 +2191,7 @@ func getReplicaSets(ctx context.Context, clientset *kubernetes.Clientset, namesp
 		data.NewField("Status", nil, []string{}),
 		data.NewField("Images", nil, []json.RawMessage{}),
 		data.NewField("Labels", nil, []json.RawMessage{}),
+		data.NewField("Annotations", nil, []json.RawMessage{}),
 		data.NewField("Target", nil, []int32{}),
 		data.NewField("Available", nil, []int32{}),
 		data.NewField("Created", nil, []time.Time{}),
@@ -2194,7 +2210,11 @@ func getReplicaSets(ctx context.Context, clientset *kubernetes.Clientset, namesp
 		if err != nil {
 			return nil, err
 		}
-		frame.AppendRow(pod.Name, pod.Namespace, "ok", json.RawMessage(jsonImages), json.RawMessage(labels), pod.Status.Replicas, pod.Status.AvailableReplicas, pod.CreationTimestamp.Time)
+		annotations, err := json.Marshal(pod.ObjectMeta.Annotations)
+		if err != nil {
+			return nil, err
+		}
+		frame.AppendRow(pod.Name, pod.Namespace, "ok", json.RawMessage(jsonImages), json.RawMessage(labels), json.RawMessage(annotations), pod.Status.Replicas, pod.Status.AvailableReplicas, pod.CreationTimestamp.Time)
 	}
 
 	return frame, nil
@@ -2214,6 +2234,7 @@ func getJobs(ctx context.Context, clientset *kubernetes.Clientset, namespace str
 		data.NewField("Status", nil, []string{}),
 		data.NewField("Images", nil, []json.RawMessage{}),
 		data.NewField("Labels", nil, []json.RawMessage{}),
+		data.NewField("Annotations", nil, []json.RawMessage{}),
 		data.NewField("Succeeded", nil, []int32{}),
 		data.NewField("Completed", nil, []*int32{}),
 		data.NewField("Created", nil, []time.Time{}),
@@ -2232,7 +2253,11 @@ func getJobs(ctx context.Context, clientset *kubernetes.Clientset, namespace str
 		if err != nil {
 			return nil, err
 		}
-		frame.AppendRow(itm.Name, itm.Namespace, "ok", json.RawMessage(jsonImages), json.RawMessage(labels), itm.Status.Succeeded, itm.Spec.Completions, itm.CreationTimestamp.Time)
+		annotations, err := json.Marshal(itm.ObjectMeta.Annotations)
+		if err != nil {
+			return nil, err
+		}
+		frame.AppendRow(itm.Name, itm.Namespace, "ok", json.RawMessage(jsonImages), json.RawMessage(labels), json.RawMessage(annotations), itm.Status.Succeeded, itm.Spec.Completions, itm.CreationTimestamp.Time)
 	}
 
 	return frame, nil
@@ -2270,6 +2295,7 @@ func getCronJobs(ctx context.Context, clientset *kubernetes.Clientset, namespace
 		data.NewField("Status", nil, []string{}),
 		data.NewField("Images", nil, []json.RawMessage{}),
 		data.NewField("Labels", nil, []json.RawMessage{}),
+		data.NewField("Annotations", nil, []json.RawMessage{}),
 		data.NewField("Schedule", nil, []string{}),
 		data.NewField("Suspend", nil, []*bool{}),
 		data.NewField("Active", nil, []int32{}),
@@ -2290,6 +2316,10 @@ func getCronJobs(ctx context.Context, clientset *kubernetes.Clientset, namespace
 		if err != nil {
 			return nil, err
 		}
+		annotations, err := json.Marshal(itm.ObjectMeta.Annotations)
+		if err != nil {
+			return nil, err
+		}
 
 		// Handle LastScheduleTime (use zero time if nil)
 		var lastScheduled *time.Time
@@ -2297,7 +2327,7 @@ func getCronJobs(ctx context.Context, clientset *kubernetes.Clientset, namespace
 			lastScheduled = &itm.Status.LastScheduleTime.Time
 		}
 
-		frame.AppendRow(itm.Name, itm.Namespace, "ok", json.RawMessage(jsonImages), json.RawMessage(labels), itm.Spec.Schedule, itm.Spec.Suspend, int32(len(itm.Status.Active)), lastScheduled, itm.CreationTimestamp.Time)
+		frame.AppendRow(itm.Name, itm.Namespace, "ok", json.RawMessage(jsonImages), json.RawMessage(labels), json.RawMessage(annotations), itm.Spec.Schedule, itm.Spec.Suspend, int32(len(itm.Status.Active)), lastScheduled, itm.CreationTimestamp.Time)
 	}
 
 	return frame, nil
@@ -2315,6 +2345,7 @@ func getPods(ctx context.Context, clientset *kubernetes.Clientset, namespace str
 		data.NewField("Namespace", nil, []string{}),
 		data.NewField("Images", nil, []json.RawMessage{}),
 		data.NewField("Labels", nil, []json.RawMessage{}),
+		data.NewField("Annotations", nil, []json.RawMessage{}),
 		data.NewField("Node", nil, []string{}),
 		data.NewField("Status", nil, []string{}),
 		data.NewField("Restarts", nil, []int32{}),
@@ -2334,11 +2365,15 @@ func getPods(ctx context.Context, clientset *kubernetes.Clientset, namespace str
 		if err != nil {
 			return nil, err
 		}
+		annotations, err := json.Marshal(pod.ObjectMeta.Annotations)
+		if err != nil {
+			return nil, err
+		}
 		var totalRestarts int32
 		for _, containerStatus := range pod.Status.ContainerStatuses {
 			totalRestarts += containerStatus.RestartCount
 		}
-		frame.AppendRow(pod.Name, pod.Namespace, json.RawMessage(jsonImages), json.RawMessage(labels), pod.Spec.NodeName, string(pod.Status.Phase), totalRestarts, pod.CreationTimestamp.Time)
+		frame.AppendRow(pod.Name, pod.Namespace, json.RawMessage(jsonImages), json.RawMessage(labels), json.RawMessage(annotations), pod.Spec.NodeName, string(pod.Status.Phase), totalRestarts, pod.CreationTimestamp.Time)
 	}
 
 	return frame, nil
@@ -2394,6 +2429,7 @@ func getServices(ctx context.Context, clientset *kubernetes.Clientset, namespace
 		data.NewField("Cluster IP", nil, []string{}),
 		data.NewField("Ports", nil, []json.RawMessage{}),
 		data.NewField("Labels", nil, []json.RawMessage{}),
+		data.NewField("Annotations", nil, []json.RawMessage{}),
 		data.NewField("Created", nil, []time.Time{}),
 	)
 
@@ -2415,7 +2451,11 @@ func getServices(ctx context.Context, clientset *kubernetes.Clientset, namespace
 		if err != nil {
 			return nil, err
 		}
-		frame.AppendRow(svc.Name, svc.Namespace, string(svc.Spec.Type), svc.Spec.ClusterIP, json.RawMessage(jsonPorts), json.RawMessage(labels), svc.CreationTimestamp.Time)
+		annotations, err := json.Marshal(svc.ObjectMeta.Annotations)
+		if err != nil {
+			return nil, err
+		}
+		frame.AppendRow(svc.Name, svc.Namespace, string(svc.Spec.Type), svc.Spec.ClusterIP, json.RawMessage(jsonPorts), json.RawMessage(labels), json.RawMessage(annotations), svc.CreationTimestamp.Time)
 	}
 
 	return frame, nil
@@ -2434,6 +2474,7 @@ func getIngresses(ctx context.Context, clientset *kubernetes.Clientset, namespac
 		data.NewField("Hosts", nil, []json.RawMessage{}),
 		data.NewField("TLS", nil, []bool{}),
 		data.NewField("Labels", nil, []json.RawMessage{}),
+		data.NewField("Annotations", nil, []json.RawMessage{}),
 		data.NewField("Created", nil, []time.Time{}),
 	)
 
@@ -2454,7 +2495,11 @@ func getIngresses(ctx context.Context, clientset *kubernetes.Clientset, namespac
 		if err != nil {
 			return nil, err
 		}
-		frame.AppendRow(ing.Name, ing.Namespace, className, json.RawMessage(jsonHosts), len(ing.Spec.TLS) > 0, json.RawMessage(labels), ing.CreationTimestamp.Time)
+		annotations, err := json.Marshal(ing.ObjectMeta.Annotations)
+		if err != nil {
+			return nil, err
+		}
+		frame.AppendRow(ing.Name, ing.Namespace, className, json.RawMessage(jsonHosts), len(ing.Spec.TLS) > 0, json.RawMessage(labels), json.RawMessage(annotations), ing.CreationTimestamp.Time)
 	}
 
 	return frame, nil
@@ -2470,6 +2515,7 @@ func getIngressClasses(ctx context.Context, clientset *kubernetes.Clientset, lis
 		data.NewField("Name", nil, []string{}),
 		data.NewField("Controller", nil, []string{}),
 		data.NewField("Labels", nil, []json.RawMessage{}),
+		data.NewField("Annotations", nil, []json.RawMessage{}),
 		data.NewField("Created", nil, []time.Time{}),
 	)
 
@@ -2478,7 +2524,11 @@ func getIngressClasses(ctx context.Context, clientset *kubernetes.Clientset, lis
 		if err != nil {
 			return nil, err
 		}
-		frame.AppendRow(ic.Name, ic.Spec.Controller, json.RawMessage(labels), ic.CreationTimestamp.Time)
+		annotations, err := json.Marshal(ic.ObjectMeta.Annotations)
+		if err != nil {
+			return nil, err
+		}
+		frame.AppendRow(ic.Name, ic.Spec.Controller, json.RawMessage(labels), json.RawMessage(annotations), ic.CreationTimestamp.Time)
 	}
 
 	return frame, nil
@@ -2495,6 +2545,7 @@ func getConfigMaps(ctx context.Context, clientset *kubernetes.Clientset, namespa
 		data.NewField("Namespace", nil, []string{}),
 		data.NewField("Keys", nil, []json.RawMessage{}),
 		data.NewField("Labels", nil, []json.RawMessage{}),
+		data.NewField("Annotations", nil, []json.RawMessage{}),
 		data.NewField("Created", nil, []time.Time{}),
 	)
 
@@ -2511,7 +2562,11 @@ func getConfigMaps(ctx context.Context, clientset *kubernetes.Clientset, namespa
 		if err != nil {
 			return nil, err
 		}
-		frame.AppendRow(cm.Name, cm.Namespace, json.RawMessage(jsonKeys), json.RawMessage(labels), cm.CreationTimestamp.Time)
+		annotations, err := json.Marshal(cm.ObjectMeta.Annotations)
+		if err != nil {
+			return nil, err
+		}
+		frame.AppendRow(cm.Name, cm.Namespace, json.RawMessage(jsonKeys), json.RawMessage(labels), json.RawMessage(annotations), cm.CreationTimestamp.Time)
 	}
 
 	return frame, nil
@@ -2529,6 +2584,7 @@ func getSecrets(ctx context.Context, clientset *kubernetes.Clientset, namespace 
 		data.NewField("Type", nil, []string{}),
 		data.NewField("Keys", nil, []json.RawMessage{}),
 		data.NewField("Labels", nil, []json.RawMessage{}),
+		data.NewField("Annotations", nil, []json.RawMessage{}),
 		data.NewField("Created", nil, []time.Time{}),
 	)
 
@@ -2545,7 +2601,11 @@ func getSecrets(ctx context.Context, clientset *kubernetes.Clientset, namespace 
 		if err != nil {
 			return nil, err
 		}
-		frame.AppendRow(secret.Name, secret.Namespace, string(secret.Type), json.RawMessage(jsonKeys), json.RawMessage(labels), secret.CreationTimestamp.Time)
+		annotations, err := json.Marshal(secret.ObjectMeta.Annotations)
+		if err != nil {
+			return nil, err
+		}
+		frame.AppendRow(secret.Name, secret.Namespace, string(secret.Type), json.RawMessage(jsonKeys), json.RawMessage(labels), json.RawMessage(annotations), secret.CreationTimestamp.Time)
 	}
 
 	return frame, nil
@@ -2565,6 +2625,7 @@ func getPersistentVolumeClaims(ctx context.Context, clientset *kubernetes.Client
 		data.NewField("Capacity", nil, []string{}),
 		data.NewField("Access Modes", nil, []json.RawMessage{}),
 		data.NewField("Labels", nil, []json.RawMessage{}),
+		data.NewField("Annotations", nil, []json.RawMessage{}),
 		data.NewField("Created", nil, []time.Time{}),
 	)
 
@@ -2589,7 +2650,11 @@ func getPersistentVolumeClaims(ctx context.Context, clientset *kubernetes.Client
 		if err != nil {
 			return nil, err
 		}
-		frame.AppendRow(pvc.Name, pvc.Namespace, string(pvc.Status.Phase), storageClass, capacity, json.RawMessage(jsonModes), json.RawMessage(labels), pvc.CreationTimestamp.Time)
+		annotations, err := json.Marshal(pvc.ObjectMeta.Annotations)
+		if err != nil {
+			return nil, err
+		}
+		frame.AppendRow(pvc.Name, pvc.Namespace, string(pvc.Status.Phase), storageClass, capacity, json.RawMessage(jsonModes), json.RawMessage(labels), json.RawMessage(annotations), pvc.CreationTimestamp.Time)
 	}
 
 	return frame, nil
@@ -2607,6 +2672,7 @@ func getStorageClasses(ctx context.Context, clientset *kubernetes.Clientset, lis
 		data.NewField("Reclaim Policy", nil, []string{}),
 		data.NewField("Volume Binding Mode", nil, []string{}),
 		data.NewField("Labels", nil, []json.RawMessage{}),
+		data.NewField("Annotations", nil, []json.RawMessage{}),
 		data.NewField("Created", nil, []time.Time{}),
 	)
 
@@ -2623,7 +2689,11 @@ func getStorageClasses(ctx context.Context, clientset *kubernetes.Clientset, lis
 		if err != nil {
 			return nil, err
 		}
-		frame.AppendRow(sc.Name, sc.Provisioner, reclaimPolicy, bindingMode, json.RawMessage(labels), sc.CreationTimestamp.Time)
+		annotations, err := json.Marshal(sc.ObjectMeta.Annotations)
+		if err != nil {
+			return nil, err
+		}
+		frame.AppendRow(sc.Name, sc.Provisioner, reclaimPolicy, bindingMode, json.RawMessage(labels), json.RawMessage(annotations), sc.CreationTimestamp.Time)
 	}
 
 	return frame, nil
@@ -2647,6 +2717,7 @@ func getCRDs(ctx context.Context, clientset *kubernetes.Clientset, listOpts meta
 			Metadata struct {
 				Name              string            `json:"name"`
 				Labels            map[string]string `json:"labels"`
+				Annotations       map[string]string `json:"annotations"`
 				CreationTimestamp time.Time         `json:"creationTimestamp"`
 			} `json:"metadata"`
 			Spec struct {
@@ -2668,6 +2739,7 @@ func getCRDs(ctx context.Context, clientset *kubernetes.Clientset, listOpts meta
 		data.NewField("Kind", nil, []string{}),
 		data.NewField("Scope", nil, []string{}),
 		data.NewField("Labels", nil, []json.RawMessage{}),
+		data.NewField("Annotations", nil, []json.RawMessage{}),
 		data.NewField("Created", nil, []time.Time{}),
 	)
 
@@ -2676,7 +2748,11 @@ func getCRDs(ctx context.Context, clientset *kubernetes.Clientset, listOpts meta
 		if err != nil {
 			return nil, err
 		}
-		frame.AppendRow(crd.Metadata.Name, crd.Spec.Group, crd.Spec.Names.Kind, crd.Spec.Scope, json.RawMessage(labels), crd.Metadata.CreationTimestamp)
+		annotations, err := json.Marshal(crd.Metadata.Annotations)
+		if err != nil {
+			return nil, err
+		}
+		frame.AppendRow(crd.Metadata.Name, crd.Spec.Group, crd.Spec.Names.Kind, crd.Spec.Scope, json.RawMessage(labels), json.RawMessage(annotations), crd.Metadata.CreationTimestamp)
 	}
 
 	return frame, nil
@@ -2693,6 +2769,7 @@ func getClusterRoleBindings(ctx context.Context, clientset *kubernetes.Clientset
 		data.NewField("Role", nil, []string{}),
 		data.NewField("Subjects", nil, []json.RawMessage{}),
 		data.NewField("Labels", nil, []json.RawMessage{}),
+		data.NewField("Annotations", nil, []json.RawMessage{}),
 		data.NewField("Created", nil, []time.Time{}),
 	)
 
@@ -2714,8 +2791,12 @@ func getClusterRoleBindings(ctx context.Context, clientset *kubernetes.Clientset
 		if err != nil {
 			return nil, err
 		}
+		annotations, err := json.Marshal(crb.ObjectMeta.Annotations)
+		if err != nil {
+			return nil, err
+		}
 		roleRef := crb.RoleRef.Kind + "/" + crb.RoleRef.Name
-		frame.AppendRow(crb.Name, roleRef, json.RawMessage(jsonSubjects), json.RawMessage(labels), crb.CreationTimestamp.Time)
+		frame.AppendRow(crb.Name, roleRef, json.RawMessage(jsonSubjects), json.RawMessage(labels), json.RawMessage(annotations), crb.CreationTimestamp.Time)
 	}
 
 	return frame, nil
@@ -2731,6 +2812,7 @@ func getClusterRoles(ctx context.Context, clientset *kubernetes.Clientset, listO
 		data.NewField("Name", nil, []string{}),
 		data.NewField("Rules", nil, []int32{}),
 		data.NewField("Labels", nil, []json.RawMessage{}),
+		data.NewField("Annotations", nil, []json.RawMessage{}),
 		data.NewField("Created", nil, []time.Time{}),
 	)
 
@@ -2739,7 +2821,11 @@ func getClusterRoles(ctx context.Context, clientset *kubernetes.Clientset, listO
 		if err != nil {
 			return nil, err
 		}
-		frame.AppendRow(cr.Name, int32(len(cr.Rules)), json.RawMessage(labels), cr.CreationTimestamp.Time)
+		annotations, err := json.Marshal(cr.ObjectMeta.Annotations)
+		if err != nil {
+			return nil, err
+		}
+		frame.AppendRow(cr.Name, int32(len(cr.Rules)), json.RawMessage(labels), json.RawMessage(annotations), cr.CreationTimestamp.Time)
 	}
 
 	return frame, nil
@@ -2782,6 +2868,7 @@ func getNetworkPolicies(ctx context.Context, clientset *kubernetes.Clientset, na
 		data.NewField("Pod Selector", nil, []string{}),
 		data.NewField("Policy Types", nil, []json.RawMessage{}),
 		data.NewField("Labels", nil, []json.RawMessage{}),
+		data.NewField("Annotations", nil, []json.RawMessage{}),
 		data.NewField("Created", nil, []time.Time{}),
 	)
 
@@ -2799,7 +2886,11 @@ func getNetworkPolicies(ctx context.Context, clientset *kubernetes.Clientset, na
 		if err != nil {
 			return nil, err
 		}
-		frame.AppendRow(np.Name, np.Namespace, podSelector, json.RawMessage(jsonTypes), json.RawMessage(labels), np.CreationTimestamp.Time)
+		annotations, err := json.Marshal(np.ObjectMeta.Annotations)
+		if err != nil {
+			return nil, err
+		}
+		frame.AppendRow(np.Name, np.Namespace, podSelector, json.RawMessage(jsonTypes), json.RawMessage(labels), json.RawMessage(annotations), np.CreationTimestamp.Time)
 	}
 
 	return frame, nil
@@ -2864,6 +2955,7 @@ func getNodes(ctx context.Context, clientset *kubernetes.Clientset, listOpts met
 		data.NewField("Version", nil, []string{}),
 		data.NewField("OS", nil, []string{}),
 		data.NewField("Labels", nil, []json.RawMessage{}),
+		data.NewField("Annotations", nil, []json.RawMessage{}),
 		data.NewField("Created", nil, []time.Time{}),
 	)
 
@@ -2886,6 +2978,10 @@ func getNodes(ctx context.Context, clientset *kubernetes.Clientset, listOpts met
 			}
 		}
 		labels, err := json.Marshal(node.ObjectMeta.Labels)
+		if err != nil {
+			return nil, err
+		}
+		annotations, err := json.Marshal(node.ObjectMeta.Annotations)
 		if err != nil {
 			return nil, err
 		}
@@ -2918,7 +3014,7 @@ func getNodes(ctx context.Context, clientset *kubernetes.Clientset, listOpts met
 		frame.AppendRow(node.Name, status, strings.Join(roles, ","),
 			podStr, cpuReqStr, cpuLimStr, memReqStr, memLimStr,
 			node.Status.NodeInfo.KubeletVersion, node.Status.NodeInfo.OSImage,
-			json.RawMessage(labels), node.CreationTimestamp.Time)
+			json.RawMessage(labels), json.RawMessage(annotations), node.CreationTimestamp.Time)
 	}
 
 	return frame, nil
@@ -2939,6 +3035,7 @@ func getPersistentVolumes(ctx context.Context, clientset *kubernetes.Clientset, 
 		data.NewField("Reclaim Policy", nil, []string{}),
 		data.NewField("Claim", nil, []string{}),
 		data.NewField("Labels", nil, []json.RawMessage{}),
+		data.NewField("Annotations", nil, []json.RawMessage{}),
 		data.NewField("Created", nil, []time.Time{}),
 	)
 
@@ -2963,7 +3060,11 @@ func getPersistentVolumes(ctx context.Context, clientset *kubernetes.Clientset, 
 		if err != nil {
 			return nil, err
 		}
-		frame.AppendRow(pv.Name, string(pv.Status.Phase), pv.Spec.StorageClassName, capacity, json.RawMessage(jsonModes), string(pv.Spec.PersistentVolumeReclaimPolicy), claim, json.RawMessage(labels), pv.CreationTimestamp.Time)
+		annotations, err := json.Marshal(pv.ObjectMeta.Annotations)
+		if err != nil {
+			return nil, err
+		}
+		frame.AppendRow(pv.Name, string(pv.Status.Phase), pv.Spec.StorageClassName, capacity, json.RawMessage(jsonModes), string(pv.Spec.PersistentVolumeReclaimPolicy), claim, json.RawMessage(labels), json.RawMessage(annotations), pv.CreationTimestamp.Time)
 	}
 
 	return frame, nil
@@ -2981,6 +3082,7 @@ func getRoleBindings(ctx context.Context, clientset *kubernetes.Clientset, names
 		data.NewField("Role", nil, []string{}),
 		data.NewField("Subjects", nil, []json.RawMessage{}),
 		data.NewField("Labels", nil, []json.RawMessage{}),
+		data.NewField("Annotations", nil, []json.RawMessage{}),
 		data.NewField("Created", nil, []time.Time{}),
 	)
 
@@ -3002,8 +3104,12 @@ func getRoleBindings(ctx context.Context, clientset *kubernetes.Clientset, names
 		if err != nil {
 			return nil, err
 		}
+		annotations, err := json.Marshal(rb.ObjectMeta.Annotations)
+		if err != nil {
+			return nil, err
+		}
 		roleRef := rb.RoleRef.Kind + "/" + rb.RoleRef.Name
-		frame.AppendRow(rb.Name, rb.Namespace, roleRef, json.RawMessage(jsonSubjects), json.RawMessage(labels), rb.CreationTimestamp.Time)
+		frame.AppendRow(rb.Name, rb.Namespace, roleRef, json.RawMessage(jsonSubjects), json.RawMessage(labels), json.RawMessage(annotations), rb.CreationTimestamp.Time)
 	}
 
 	return frame, nil
@@ -3020,6 +3126,7 @@ func getRoles(ctx context.Context, clientset *kubernetes.Clientset, namespace st
 		data.NewField("Namespace", nil, []string{}),
 		data.NewField("Rules", nil, []int32{}),
 		data.NewField("Labels", nil, []json.RawMessage{}),
+		data.NewField("Annotations", nil, []json.RawMessage{}),
 		data.NewField("Created", nil, []time.Time{}),
 	)
 
@@ -3028,7 +3135,11 @@ func getRoles(ctx context.Context, clientset *kubernetes.Clientset, namespace st
 		if err != nil {
 			return nil, err
 		}
-		frame.AppendRow(role.Name, role.Namespace, int32(len(role.Rules)), json.RawMessage(labels), role.CreationTimestamp.Time)
+		annotations, err := json.Marshal(role.ObjectMeta.Annotations)
+		if err != nil {
+			return nil, err
+		}
+		frame.AppendRow(role.Name, role.Namespace, int32(len(role.Rules)), json.RawMessage(labels), json.RawMessage(annotations), role.CreationTimestamp.Time)
 	}
 
 	return frame, nil
@@ -3045,6 +3156,7 @@ func getServiceAccounts(ctx context.Context, clientset *kubernetes.Clientset, na
 		data.NewField("Namespace", nil, []string{}),
 		data.NewField("Secrets", nil, []int32{}),
 		data.NewField("Labels", nil, []json.RawMessage{}),
+		data.NewField("Annotations", nil, []json.RawMessage{}),
 		data.NewField("Created", nil, []time.Time{}),
 	)
 
@@ -3053,7 +3165,11 @@ func getServiceAccounts(ctx context.Context, clientset *kubernetes.Clientset, na
 		if err != nil {
 			return nil, err
 		}
-		frame.AppendRow(sa.Name, sa.Namespace, int32(len(sa.Secrets)), json.RawMessage(labels), sa.CreationTimestamp.Time)
+		annotations, err := json.Marshal(sa.ObjectMeta.Annotations)
+		if err != nil {
+			return nil, err
+		}
+		frame.AppendRow(sa.Name, sa.Namespace, int32(len(sa.Secrets)), json.RawMessage(labels), json.RawMessage(annotations), sa.CreationTimestamp.Time)
 	}
 
 	return frame, nil
