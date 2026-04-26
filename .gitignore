@@ -41,3 +41,4 @@ ci/
 # Local test credentials (never commit)
 .env.test.local
 provisioning-local/datasources.yml
+DEVELOPMENT.md

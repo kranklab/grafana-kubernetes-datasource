@@ -7,7 +7,7 @@
   "backend": true,
   "executable": "gpx_kubernetes_datasource",
   "info": {
-    "description": "",
+    "description": "A Grafana backend datasource plugin that queries the Kubernetes API directly, supporting workloads, RBAC, storage, networking, CRDs, and more.",
     "author": {
       "name": "Kranklab"
     },
@@ -16,8 +16,18 @@
       "small": "img/logo.svg",
       "large": "img/logo.svg"
     },
-    "links": [],
-    "screenshots": [],
+    "links": [
+      {
+        "name": "GitHub",
+        "url": "https://github.com/kranklab/grafana-kubernetes-datasource"
+      }
+    ],
+    "screenshots": [
+      {
+        "name": "Dashboard",
+        "path": "img/datasource.png"
+      }
+    ],
     "version": "%VERSION%",
     "updated": "%TODAY%"
   },
