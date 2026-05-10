@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/grafana/grafana/main/docs/sources/developers/plugins/plugin.schema.json",
   "type": "datasource",
-  "name": "Kubernetes-Datasource",
+  "name": "Kubernetes Datasource",
   "id": "kranklab-kubernetes-datasource",
   "metrics": true,
   "backend": true,
@@ -11,7 +11,7 @@
     "author": {
       "name": "Kranklab"
     },
-    "keywords": ["datasource"],
+    "keywords": ["datasource","kubernetes"],
     "logos": {
       "small": "img/logo.svg",
       "large": "img/logo.svg"
