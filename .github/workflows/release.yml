@@ -7,6 +7,8 @@ on:
 
 permissions:
   contents: write
+  id-token: write
+  attestations: write
 
 jobs:
   release:
@@ -56,6 +58,11 @@ jobs:
           zip -r "${{ steps.meta.outputs.archive }}" "${{ steps.meta.outputs.plugin-id }}"
           sha1sum "${{ steps.meta.outputs.archive }}" | awk '{print $1}' > "${{ steps.meta.outputs.archive }}.sha1"
           sha256sum "${{ steps.meta.outputs.archive }}" | awk '{print $1}' > "${{ steps.meta.outputs.archive }}.sha256"
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: ${{ steps.meta.outputs.archive }}
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
