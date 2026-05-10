@@ -54,12 +54,17 @@ jobs:
           cp LICENSE dist/
           mv dist "${{ steps.meta.outputs.plugin-id }}"
           zip -r "${{ steps.meta.outputs.archive }}" "${{ steps.meta.outputs.plugin-id }}"
+          sha1sum "${{ steps.meta.outputs.archive }}" | awk '{print $1}' > "${{ steps.meta.outputs.archive }}.sha1"
+          sha256sum "${{ steps.meta.outputs.archive }}" | awk '{print $1}' > "${{ steps.meta.outputs.archive }}.sha256"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.meta.outputs.plugin-id }}-${{ steps.meta.outputs.plugin-version }}
-          path: ${{ steps.meta.outputs.archive }}
+          path: |
+            ${{ steps.meta.outputs.archive }}
+            ${{ steps.meta.outputs.archive }}.sha1
+            ${{ steps.meta.outputs.archive }}.sha256
           retention-days: 7
 
       - name: Create release
@@ -68,10 +73,14 @@ jobs:
         run: |
           if gh release view "${{ github.ref_name }}" > /dev/null 2>&1; then
             gh release upload "${{ github.ref_name }}" \
-              "${{ steps.meta.outputs.archive }}" --clobber
+              "${{ steps.meta.outputs.archive }}" \
+              "${{ steps.meta.outputs.archive }}.sha1" \
+              "${{ steps.meta.outputs.archive }}.sha256" --clobber
           else
             gh release create "${{ github.ref_name }}" \
               --title "${{ steps.meta.outputs.plugin-id }} v${{ steps.meta.outputs.plugin-version }}" \
               --generate-notes \
-              "${{ steps.meta.outputs.archive }}"
+              "${{ steps.meta.outputs.archive }}" \
+              "${{ steps.meta.outputs.archive }}.sha1" \
+              "${{ steps.meta.outputs.archive }}.sha256"
           fi
